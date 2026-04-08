@@ -1,17 +1,19 @@
 ---
 name: review-pipeline
-version: 0.1.0
+version: 0.2.0
 description: >
-  Use when user asks to "review my code", "run a code review", "review this PR",
-  "check my diff", "analyze these changes", or "do a security review".
-user-invocable: true
+  This skill should be used when the user asks to "review my code", "run a code review",
+  "review this PR", "check my diff", "analyze these changes", "do a security review",
+  "audit my code", "check for bugs", "review before I push", or "what's wrong with my diff".
+  It orchestrates a multi-stage, tiered code review pipeline with deterministic checks,
+  parallel agent analysis, convergence tracking, and optional auto-fix.
 ---
 
 # Review Pipeline
 
 You are executing a multi-stage code review pipeline. Follow each stage precisely. The pipeline flow is:
 
-**Parse Arguments -> Handle Resume -> Lock -> Convergence Check -> Pre-Stage -> Stage 0 -> Stage 1 -> Stage 2 -> Stage 3 -> Stage 4 -> Output -> Cleanup**
+**Parse Arguments -> Resume? (if --resume) -> Lock -> Convergence Check -> Pre-Stage -> Stage 0 -> Stage 1 -> Stage 2 -> Stage 3 -> Stage 4 -> Output -> Cleanup**
 
 ## Invariants -- Never Violate These
 
@@ -22,7 +24,8 @@ You are executing a multi-stage code review pipeline. Follow each stage precisel
 5. **Finding schema is canonical here.** fix-and-verify references this skill's schema; it does not redefine it.
 6. **`reporters` is always an array.** Never produce a bare `reviewer` string.
 7. **Gate 4 (API fuzz) is advisory only.** It never blocks the pipeline.
-8. **Never substitute an Agent tool call for a Codex dispatch.** Codex provides cross-model architectural diversity -- a Claude/Opus agent reviewing its own model family's work cannot catch the same blind spots. Always use `Skill: codex-agent:dispatch`, never the Agent tool, for adversarial cross-model review.
+8. **Never substitute an Agent tool call for a Codex dispatch.** Codex provides cross-model architectural diversity -- a Claude/Opus agent reviewing its own model family's work cannot catch the same blind spots. Always use `Skill: codex-agent:dispatch`, never the Agent tool, for Codex Adversarial testing.
+9. **Gate 5 (patch size) is advisory for P2/P3 and conditionally escalating for P0/P1.** It never causes a retry loop. Escalate (to human) if > 200 lines for P0/P1.
 
 ## Parse Arguments
 
@@ -33,14 +36,16 @@ Parse the user's arguments:
 | `--lightweight` | Force Lightweight tier |
 | `--standard` | Force Standard tier |
 | `--critical` | Force Critical tier (always accepted) |
-| `--files <paths>` | Review specific files instead of full git diff HEAD. When provided: generate diffs with `git diff HEAD -- <paths>`, restrict `--stat`/`--name-only` to those paths, skip caller analysis outside those paths, and scope deterministic checks to only the stacks those files belong to. On `--resume`, the stored `files_scope` is reused automatically. |
+| `--files <paths>` | Review specific files instead of full git diff HEAD. When provided: generate diffs with `git diff HEAD -- <paths>`, restrict `--stat`/`--name-only`/`--shortstat` to those paths, skip caller analysis outside those paths (exception: Lightweight qualification always uses repo-wide caller analysis regardless of --files), and scope deterministic checks to only the stacks those files belong to. On `--resume`, the stored `files_scope` is reused automatically. |
 | `--resume <id>` | Resume from a previous run's state file |
 | `--no-autofix` | Skip auto-fix in Stage 2 |
 | `--verbose` | Show P3 findings (suppressed by default) |
 
 **Mutual exclusivity:** Only one of `--lightweight`, `--standard`, `--critical` may be provided. If multiple are given, error: "Only one tier flag may be specified. Got: [list]."
 
-**Diff size check:** Run `git diff HEAD [-- <paths>]` and count the total characters. If the diff exceeds 50,000 characters, error: "Diff too large. Use --files to narrow scope."
+**Empty repo check:** If `git rev-parse HEAD` fails (exit non-zero), error: "Repository has no commits. Create an initial commit before running the review pipeline."
+
+**Diff size check:** Run `git diff HEAD [-- <paths>]` and count the total characters (including diff headers). If the diff exceeds 50,000 characters, error: "Diff too large. Use --files to narrow scope."
 
 ## Handle Resume
 
@@ -48,9 +53,9 @@ If `--resume <id>` is provided:
 
 1. Read `.review-state/<id>.json`
 2. If the file does not exist, error: "No state file found for run <id>"
-3. If `schema_version` is `1`, normalize all findings: for any finding with a `reviewer` field (string), replace it with `reporters: [reviewer]` and remove the `reviewer` field. Set `schema_version` to `2` and write back.
+3. If `schema_version` is `1`, apply migrations per `references/state-schema.md` Migration Rules (v1 -> v2). Write back.
 4. Compare stored `branch_name` to current `git rev-parse --abbrev-ref HEAD`. If they differ, error: "Branch has changed since run <id>. Start a new run."
-5. Compare stored `base_commit` to current merge-base (run `git merge-base HEAD main` or the detected default branch). Detect default branch: run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`. If that fails, try `main`, then `master`. If the merge-base differs, error: "Base commit has changed since run <id>. Start a new run."
+5. Compare stored `base_commit` to current merge-base (run `git merge-base HEAD main` or the detected default branch). Detect default branch: read the file `.git/refs/remotes/origin/HEAD` using the Read tool and strip the `ref: refs/remotes/origin/` prefix. If the file does not exist, try `main`, then `master`. If both `main` and `master` exist as remote branches and `origin/HEAD` cannot be resolved, warn: "Cannot determine default branch -- defaulting to `main`. Pass `--base-branch <branch>` to override." If the merge-base differs, error: "Base commit has changed since run <id>. Start a new run."
 6. Compute a diff fingerprint: `git diff HEAD [-- <stored files_scope>] | git hash-object --stdin`. If it differs from stored `diff_fingerprint`: warn "Diff has changed since run <id> -- new findings may not match previous run." Also clear `gate_6_baseline`, `gate_7_baseline`, `gate_6_post_autofix`, and `gate_7_post_autofix` from the state so Pre-Stage will re-capture fresh baselines.
 7. Skip stages already completed (check `stages_completed` array in state)
 8. Load existing findings array and continue from next stage
@@ -67,12 +72,17 @@ The lock schema is: `{ "schema_version": 2, "run_id": "<uuid>", "created_at": "<
 | Condition | Action |
 |-----------|--------|
 | Lock's `written_at` > 15 minutes ago AND state file's `updated_at` > 15 minutes ago | Stale lock. Delete it. Warn: "Stale lock from hung run cleaned up." |
+| Lock's `written_at` > 15 minutes ago AND state file's `updated_at` <= 15 minutes ago (recent) | Active run in a long stage. Treat as active. Error: "Run [run_id] appears to be in a long-running stage (lock stale but state recently updated). Wait or delete the lock manually." |
 | Lock's `written_at` <= 15 minutes ago (fresh) | Active run. Error: "Another pipeline run is in progress (run_id: <id>). Wait for it to complete or delete `.review-state/<id>.lock` manually." |
 | Lock exists but no state file for that run_id exists | Crashed run. Delete lock. Warn: "Lock from crashed run (no state file) cleaned up." |
+
+To read the state file's `updated_at`, load `.review-state/<lock.run_id>.json` and read its `updated_at` field.
 
 The `updated_at` field must be refreshed every time the state file is written.
 
 3. Create `.review-state/<run_id>.lock` with the lock schema. Set `stage_reached` to `"init"` and `written_at` to now.
+
+**TOCTOU note:** Lock acquisition is not atomic -- between checking for existing locks and creating a new one, another invocation could also see no lock and create its own. Do not run two pipeline instances simultaneously on the same repository.
 
 **Update the lock** at every stage boundary: write the lock file again with updated `written_at` and the new `stage_reached`. This is synchronous -- write the lock file before beginning the stage's work.
 
@@ -84,18 +94,20 @@ Note: if a stage takes longer than 15 minutes (e.g., waiting for agents in Stage
 
 Run this check immediately after acquiring the lock, before any other pipeline work. See `references/convergence.md` for the full matching algorithm and stop conditions.
 
-**When to run:** If the state file (from `--resume` or a detected prior run for the same branch) contains `run_history` with at least one entry, run convergence matching. To detect a prior run: read `.review-state/latest.json`. If it exists and its `branch_name` matches the current branch, use it as the prior run's state file.
+**When to run:** If the state file (from `--resume` or a detected prior run for the same branch) contains `run_history` with at least one entry, run convergence matching. To detect a prior run: read `.review-state/latest.json`. If it exists and its `branch_name` matches the current branch, use it as the prior run's state file. If `latest.json` exists but its `branch_name` does not match the current branch, treat as no prior run (proceed without convergence check). Do not search other state files. If `--resume` is active, use the resumed state file's `run_history` as the convergence baseline. Do not also check `latest.json` separately.
 
 **What to do:**
 1. Load the prior run's findings (those with `status: "fixed"`, `"dismissed"`, or `"escalated"` as well as `"open"`).
-2. Evaluate stop conditions in order using ONLY the prior run's findings and `run_history`. Do not use "current findings" -- none exist yet. If a stop condition is met, output the current punch list and stop -- do not proceed to Stage 0. Write state file. Write `.review-state/latest.json`. Delete lock file.
+2. Evaluate stop conditions in order using ONLY the prior run's findings and `run_history`. Do not use "current findings" -- none exist yet. If a stop condition is met, output the current punch list and stop -- do not proceed to Stage 0. Append a `run_history` record (see `references/convergence.md`). Write state file. Set `updated_at` to the current ISO timestamp before writing. Write `.review-state/latest.json`. Delete lock file.
 3. If no stop condition is met, continue to Pre-Stage.
 
-Actual finding-to-finding matching between the new run's findings and prior findings occurs after Stage 2, not here. At this pre-Stage-0 checkpoint, evaluate stop conditions 1-5 using only the prior run's findings and run_history.
+Actual finding-to-finding matching between the new run's findings and prior findings occurs after Stage 2, not here. At this pre-Stage-0 checkpoint, evaluate stop conditions 1, 3, 4, and 5 using only the prior run's findings and run_history. Stop Condition 2 (regression detection) requires comparing prior and current findings and is deferred to post-Stage-2 matching -- skip it here.
 
 ## Pre-Stage: Deterministic Checks
 
 Detect the project stack using marker files (use the Glob tool -- do not use shell `find` commands). See `references/stack-table.md` for the full detection table, JS/TS disambiguation rules, tool table, and failure handling.
+
+Before writing any file to `.review-state/`, create the directory if it does not exist: `mkdir -p .review-state`.
 
 Run each detected stack's tools scoped to its package root. In monorepos, discover package roots up to 3 levels deep.
 
@@ -105,7 +117,7 @@ Run each detected stack's tools scoped to its package root. In monorepos, discov
 
 **Write state file. Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"pre-stage"`. Mark `"pre-stage"` in `stages_completed`.**
 
-When creating a new state file (not resuming), populate these fields: `run_id` (generate UUID), `branch_name` (from `git rev-parse --abbrev-ref HEAD`), `base_commit` (from `git merge-base HEAD <default_branch>`), `diff_fingerprint` (from `git diff HEAD [-- <paths>] | git hash-object --stdin`), `created_at` and `updated_at` (current ISO timestamp).
+When creating a new state file (not resuming), populate these fields: `run_id` (generate UUID), `branch_name` (from `git rev-parse --abbrev-ref HEAD`), `base_commit` (from `git merge-base HEAD <default_branch>`), `diff_fingerprint` (from `git diff HEAD [-- <paths>] | git hash-object --stdin`), `created_at` and `updated_at` (current ISO timestamp), `errors: []` (empty array — will accumulate diagnostic records during the run).
 
 ## Stage 0: Change Classification
 
@@ -170,10 +182,10 @@ Launch agents in parallel based on tier. Send the diff as context to each agent.
 
 | Situation | Action |
 |-----------|--------|
-| One agent fails to spawn (tool error or failure to return a result, unavailable type) | Warn: "Agent [name] ([type]) unavailable -- skipping. Review coverage is reduced." Continue with remaining agents. |
-| ALL agents fail | Error: "No review agents available. Cannot proceed." |
+| One agent fails to spawn (tool error or failure to return a result, unavailable type) | Warn: "Agent [name] ([type]) unavailable -- skipping. Review coverage is reduced." Append an error record to the `errors` array: `{ timestamp: "<now UTC>", stage: "stage-1", error_code: "AGENT_UNAVAILABLE", detail: "[agent name] ([type]): [error message]", finding_id: null, recovery: "skipped" }`. Continue with remaining agents. |
+| ALL agents fail | Append error records for each failed agent. Error: "No review agents available. Cannot proceed." |
 
-**Collect all findings from all agents. Update lock `written_at` and `stage_reached` to `"stage-1"`. Mark `"stage-1"` in `stages_completed`.**
+**Collect all findings from all agents. Write state file. Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"stage-1"`. Mark `"stage-1"` in `stages_completed`.**
 
 ## Stage 2: Consolidation & Triage
 
@@ -186,7 +198,7 @@ For each pair of findings, merge if ALL of:
 - Line ranges overlap or are within 5 lines of each other
 - Same category (different categories are NEVER merged even on the same line)
 
-When merging: keep the higher severity, combine descriptions, list all agent names in `reporters`.
+When merging: keep the higher severity, combine descriptions, list all agent names in `reporters`. When creating a new finding, set `finding.run_id` to the current top-level `run_id`. When merging findings, preserve the `run_id` of the higher-severity finding.
 
 ### Step 2.2: Classify
 
@@ -203,6 +215,10 @@ Tag each finding:
 
 Rank: P0 > P1 > P2 > P3. Cap at 15 findings total. Suppress P3 findings unless `--verbose`.
 
+### Step 2.1b: Post-Stage-2 Regression Check (convergence runs only)
+
+If this is a convergence re-run (prior run exists with findings), run convergence matching now using the three-level composite key (see `references/convergence.md`). Match current findings (from Stage 2 dedup) against prior run findings. Evaluate Stop Condition 2: if any current finding matches a prior finding whose `status` was `"fixed"`, that finding has regressed. Warn: "Fix for [finding_id / description] regressed." Surface it prominently in the output. Do NOT stop the pipeline on regression -- continue processing (the pipeline has already committed to this run). The regression warning is informational for the human.
+
 ### Step 2.4: Apply Auto-Fixes (skip if `--no-autofix`)
 
 For each `[AUTO-FIX]` finding:
@@ -213,16 +229,18 @@ For each `[AUTO-FIX]` finding:
    - Gate 2: Full backend test suite must pass
    - Gate 3: Full frontend test suite must pass (skip if no frontend stack)
    - Gate 6: Lint + type check must pass with no new warnings above baseline
-4. If any gate fails: restore from backup (`cp .review-state/autofix-backup-<finding_id> <file>`), delete the backup file, reclassify finding as `[CONFIRM]`.
-5. If all gates pass: delete the backup file.
+4. If any gate fails: restore from backup (read `.review-state/autofix-backup-<finding_id>` and write its contents to `<file>` using the Write tool -- do not use `cp`), delete the backup file, reclassify finding as `[CONFIRM]`.
+5. If all gates pass: set `auto_fixed: true`, `status: "fixed"`, and `fixed_at: <current ISO UTC timestamp>` on the finding. Delete the backup file.
 
 After all auto-fixes are attempted, capture post-autofix baselines:
 - Re-run lint + type check. Store warning count as `gate_6_post_autofix`.
 - Re-run coverage on changed files. Store per-file map as `gate_7_post_autofix` (or `null`).
 
+Note: When `--no-autofix` is set, `gate_6_post_autofix` and `gate_7_post_autofix` remain null. fix-and-verify will fall back to `gate_6_baseline` / `gate_7_baseline`, which may be more permissive since no auto-fixes were applied. This is an accepted trade-off.
+
 **Write state file (including post-autofix baseline fields). Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"stage-2"`. Mark `"stage-2"` in `stages_completed`.**
 
-**Lightweight tier: output the punch list and STOP here.** Write state file. Set `updated_at` to the current ISO timestamp before writing. Write `.review-state/latest.json` (copy of current state). Delete lock. Present results.
+**Lightweight tier: output the punch list and STOP here.** Append a `run_history` record (see `references/convergence.md`). Write state file. Set `updated_at` to the current ISO timestamp before writing. Write `.review-state/latest.json` (copy of current state, with the appended `run_history`). Delete lock. Present results.
 
 ## Stage 3: Specialists + Adversarial (Standard+Critical only)
 
@@ -243,19 +261,23 @@ Launch each agent only if its trigger condition is met. Apply the same availabil
 
 8. **Codex Adversarial** -- Use the Skill tool: `skill: "codex-agent:dispatch"` with args: "Adversarial code review of this diff. Be skeptical, thorough, and find bugs that a normal review would miss. [include diff]. Report findings with severity, file, line, description, and suggested fix."
 
-If Codex dispatch fails (timeout, auth error, etc.), warn: "Codex adversarial review unavailable -- [error]. Proceeding without cross-model review." Continue the pipeline.
+If the adversarial Skill tool call fails (timeout, auth error, etc.), warn: "Adversarial review unavailable -- [error]. Proceeding without it." Append an error record: `{ timestamp: "<now UTC>", stage: "stage-3b", error_code: "AGENT_D_DISPATCH_FAILED", detail: "[error]", finding_id: null, recovery: "continued" }`. Continue the pipeline.
 
-**All-agents-unavailable hard-stop:** If ALL Stage 3A specialists fail to spawn AND Codex adversarial also fails, error: "No Stage 3 review agents available. Cannot proceed with Standard/Critical review. Outputting Stage 2 results as final." Output the current punch list, write state, write `latest.json`, delete lock, and stop.
+**All-agents-unavailable hard-stop:** If ALL Stage 3A specialists fail to spawn AND Codex adversarial also fails, error: "No Stage 3 review agents available. Cannot proceed with Standard/Critical review. Outputting Stage 2 results as final." Output the current punch list. Append `run_history` record. Set `updated_at` to the current ISO timestamp. Write state, write `latest.json`, delete lock, and stop.
 
 **Collect all new findings. Merge with Stage 2 punch list using the same dedup rules.**
 
-**Update lock `written_at` and `stage_reached` to `"stage-3"`. Mark `"stage-3"` in `stages_completed`.**
+Re-apply the 15-finding cap after merging: rank P0 > P1 > P2 > P3, take the top 15, suppress the rest (count in the Advisory Warnings section).
+
+**Write state file. Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"stage-3"`. Mark `"stage-3"` in `stages_completed`.**
+
+Note: Stage 3A and 3B are treated as a single atomic unit for resume purposes. `stages_completed` is updated to `"stage-3"` only after both 3A and 3B complete. If the run is interrupted between 3A and 3B, a resume will re-run all of Stage 3.
 
 **Standard tier stop condition:**
 
 | Condition | Action |
 |-----------|--------|
-| Total P0/P1 count across ALL findings (all stages) is zero | Output punch list and STOP. Write state, write `latest.json`, delete lock. |
+| Total P0/P1 count across ALL findings (all stages) is zero | Output punch list and STOP. Append `run_history` record. Set `updated_at` to the current ISO timestamp. Write state, write `latest.json`, delete lock. |
 | Any P0/P1 findings exist | Proceed to Stage 4. |
 
 ## Stage 4: Skeptic Combined Review (Critical, or Standard with any P0/P1)
@@ -264,14 +286,16 @@ If Codex dispatch fails (timeout, auth error, etc.), warn: "Codex adversarial re
 
 If Skeptic produces new P0/P1 findings: run one targeted Codex pass via the **Skill tool**: `skill: "codex-agent:dispatch"` on the specific files and findings the Skeptic flagged. Do NOT use the Agent tool for this -- Codex is a different model architecture (see Invariant 8).
 
-**Output punch list. Write state file. Set `updated_at` to the current ISO timestamp before writing. Write `.review-state/latest.json` (copy of current state). Update lock `written_at` and `stage_reached` to `"stage-4"`. Mark `"stage-4"` in `stages_completed`. Delete lock.**
+**Skeptic dismissals:** For each finding the Skeptic recommends dismissing as a false positive, set `status: "dismissed"`, `dismissed_at: <current ISO UTC timestamp>`, and `dismissed_reason: "<Skeptic's stated reason>"` in the findings array.
+
+**Output punch list. Write state file. Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"stage-4"`. Mark `"stage-4"` in `stages_completed`. Then proceed to Cleanup.**
 
 ## Output Format
 
 ```markdown
 ## Review Pipeline Results
 
-**Run ID:** [id] | **Classification:** [Lightweight|Standard|Critical] | **Agents:** [N launched / M responded] | **Time:** [Xm Ys]
+**Run ID:** [id] | **Classification:** [Lightweight|Standard|Critical] | **Agents:** [N launched / M responded] | **Time:** [Xm Ys] (measured from lock acquisition to output)
 
 ### Pre-Stage Results
 - **Stack(s) detected:** [list]
@@ -294,7 +318,7 @@ If Skeptic produces new P0/P1 findings: run one targeted Codex pass via the **Sk
 ### Advisory Warnings
 - [out-of-scope lint failures, tool version warnings, etc.]
 
-### Suppressed (P3, use --verbose): [N]
+### Suppressed (P3, use --verbose): [N] (omit this line if --verbose was set)
 
 ### State: .review-state/[id].json (resume with --resume [id])
 ### Stable path: .review-state/latest.json
@@ -302,12 +326,13 @@ If Skeptic produces new P0/P1 findings: run one targeted Codex pass via the **Sk
 
 ## Cleanup
 
-After outputting results:
-1. Append a `run_history` record to the state file (see `references/convergence.md` for the record format) before writing `latest.json`.
-2. Write `.review-state/latest.json` (copy of current state, with the appended `run_history`).
-3. Delete `.review-state/<run_id>.lock` (if not already deleted)
-4. Prune `.review-state/*.json` files older than 7 days, excluding `latest.json` (preserves reasonable resume windows while preventing unbounded growth)
-5. Ensure `.review-state/` is in `.gitignore`
+After outputting results (this section handles cleanup for runs that reach Stage 4. Early exits -- Lightweight stop, Standard-tier stop, convergence stop, all-agents hard-stop -- perform equivalent cleanup inline and do NOT flow through this section):
+1. Append a `run_history` record to the state file (see `references/convergence.md` for the record format).
+2. Write state file. Set `updated_at` to the current ISO timestamp before writing.
+3. Write `.review-state/latest.json` (copy of current state, with the appended `run_history`).
+4. Delete `.review-state/<run_id>.lock`.
+5. Prune `.review-state/<id>.json` state files older than 7 days, excluding `latest.json`. Also prune any orphaned `.lock` files older than 7 days. Use the Glob tool to list files in `.review-state/`, then use the Bash tool to check modification dates with `stat` and delete old files. Do not delete `latest.json`.
+6. Ensure `.review-state/` is in `.gitignore`.
 
 ## References
 

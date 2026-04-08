@@ -9,8 +9,9 @@ This is the single source of truth for all gate definitions used in review-pipel
 | 1 | Specific test file passes | Detected test runner on the target test file | 60s | Exit code 0 | `TOOL_MISSING` -- escalate |
 | 2 | Full backend test suite passes | `pytest` / `./gradlew test` / `go test ./...` / `cargo test` / `jest` | 300s | Exit code 0 | `TOOL_MISSING` -- escalate |
 | 3 | Full frontend test suite passes | `vitest` / `jest` (frontend-specific config) | 180s | Exit code 0 | `[SKIP]` if no frontend stack detected |
-| 5 | Patch size | `git diff --stat` (unstaged) or `git diff --stat HEAD~1..HEAD` (after commit) -- count changed lines | 5s | Advisory: warn if > 50 lines. Escalate if > 200 lines for P0/P1. Never hard-fail for P2/P3. | N/A (always available) |
-| 6 | Lint + type check delta | Run detected lint tool + type checker (if stack has one; plain JS skips type check portion). Compare warning count against `gate_6_baseline`. | 120s | Exit code 0 AND new_warnings <= baseline_warnings | `TOOL_MISSING` -- escalate. If stack has no type checker, run lint only. |
+| 4 | API fuzz (advisory) | `schemathesis run <schema> --validate-schema true` | 120s | Advisory only -- report warnings, always proceed | `[SKIP]` if no API schema or schemathesis not installed |
+| 5 | Patch size (advisory) | `git diff --stat` (unstaged) or `git diff --stat HEAD~1..HEAD` (after commit) -- count changed lines | 5s | Always advisory. Warn > 50 lines. Escalate (to human) if > 200 lines for P0/P1. No hard-fail for P2/P3. | N/A (always available) |
+| 6 | Lint + type check delta | Run detected lint tool + type checker (if stack has one; plain JS skips type check portion). Exit code 0 AND new_warnings <= `gate_6_baseline`. If exit code is non-zero due to errors (not warnings), gate fails unconditionally. If exit code is 0, count warnings and compare against baseline. | 120s | Exit code 0 AND new_warnings <= baseline_warnings | `TOOL_MISSING` -- escalate. If stack has no type checker, run lint only. |
 | 7 | Coverage delta on changed files | Run coverage tool scoped to changed files. Compare per-file coverage against `gate_7_baseline` per-file values. | 180s | Per-file coverage >= per-file baseline | `[SKIP]` if no coverage tool detected |
 
 ## Severity Gate Requirements
@@ -18,12 +19,12 @@ This is the single source of truth for all gate definitions used in review-pipel
 | Context | Required Gates |
 |---------|---------------|
 | review-pipeline auto-fix verification (Stage 2) | 2, 3, 6 |
-| fix-and-verify P0/P1 | 1, 2, 3, 5, 6, 7 (gates 4 and 5 advisory only) |
+| fix-and-verify P0/P1 | 1, 2, 3, 6, 7 (gates 4 and 5 run but advisory -- never block. Gate 5 escalates to human if > 200 lines for P0/P1.) |
 | fix-and-verify P2/P3 | 1, 2, 3, 6 |
 
 ## Gate 4: API Fuzz (Advisory Only)
 
-Gate 4 (API fuzz smoke via schemathesis) is advisory only. It is NOT a required gate and is not included in the table above.
+Gate 4 (API fuzz smoke via schemathesis) is advisory only. It is NOT a required gate. While it appears in the Gate Table above for completeness, it is excluded from the Severity Gate Requirements table and never blocks the pipeline.
 
 - Tool: `schemathesis run <schema> --validate-schema true`
 - Timeout: 120s

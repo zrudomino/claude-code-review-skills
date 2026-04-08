@@ -11,6 +11,8 @@ All error codes produced by the fix-and-verify skill. Each entry includes the co
 | `MERGE_CONFLICT` | Cherry-pick or patch application produced unresolvable conflicts | Escalate both the current finding and any prior finding whose fix conflicts |
 | `TOOL_MISSING` | Required gate tool not found in environment | Escalate -- do not mark gate as passed |
 | `TOOL_TIMEOUT` | Gate tool exceeded its timeout | Retry gate once; if still times out, escalate |
+| `TOOL_CRASH` | Gate tool exited with a signal or abnormal exit code | Retry gate once; if same error, escalate |
+| `TOOL_ERRORS` | Gate tool ran but reported errors within diff scope (non-zero exit, not a crash) | Treat as gate failure; route per failure routing table |
 | `RED_PHASE_FAILED` | Test passes without a fix (bug may already be resolved, or test is wrong) | Escalate to human with test file and finding details |
 | `AGENT_SPAWN_FAILED` | Agent tool call failed or timed out | Retry once; if still fails, escalate the finding |
 | `AGENT_D_DISPATCH_FAILED` | Codex Adversarial dispatch failed (timeout, auth error, network error). Must use `Skill: codex-agent:dispatch`, NOT the Agent tool. | For P0/P1: escalate (mandatory). For P2/P3: warn and proceed to Step 5. |

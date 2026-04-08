@@ -19,6 +19,10 @@ After pre-flight filtering and severity sorting, count eligible findings.
 
 ### 2. Create Integration Branch
 
+Before creating the integration branch, verify the working tree is clean: `git status --porcelain`. If there are uncommitted changes, error: "Working tree has uncommitted changes. Commit or stash before running batch mode."
+
+Capture the current branch: `ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)`
+
 ```bash
 git checkout -b fix-batch-<timestamp>
 ```
@@ -65,6 +69,8 @@ After each cherry-pick, run gate 2 (full test suite) on the integration branch t
 
 If a previously-passing test now fails, this is a `DEPENDENCY_CONFLICT`. Flag both the current finding and the finding whose fix caused the regression. Escalate both to human. Do not attempt further fixes on either.
 
+**Note:** Gate 6 and 7 are not re-run on the integration branch -- they are only checked per-worktree. For P0/P1 batches, consider running Gate 6 on the integration branch after all cherry-picks are complete.
+
 #### e. Write Status Back
 
 Immediately after each finding completes (success or escalation), write the updated status back to the state file. Do not batch writes to the end. See the write-back contract in SKILL.md Step 5.
@@ -93,8 +99,10 @@ After all findings are processed, output the batch summary as described in the O
 If zero cherry-picks succeeded (all findings were escalated, skipped, or failed), delete the integration branch:
 
 ```bash
-git branch -D fix-batch-<timestamp>
+git checkout $ORIGINAL_BRANCH && git branch -D fix-batch-<timestamp>
 ```
+
+Switch back to the original branch before deleting the integration branch.
 
 This prevents orphaned branches from accumulating in the repo.
 

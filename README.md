@@ -38,4 +38,4 @@ cp -r fix-and-verify ~/.claude/skills/
 ```
 
 ## Version
-v0.1.0 | schema_version: 2
+v0.2.0 | schema_version: 2

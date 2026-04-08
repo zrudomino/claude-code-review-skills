@@ -1,10 +1,12 @@
 ---
 name: fix-and-verify
-version: 0.1.0
+version: 0.2.0
 description: >
-  Use when user asks to "fix this finding", "fix and verify", "fix the punch list",
-  "fix these review findings", or "commit a fix for this bug".
-user-invocable: true
+  This skill should be used when the user asks to "fix this finding", "fix and verify",
+  "fix the punch list", "fix these review findings", "commit a fix for this bug",
+  "apply the fix", "resolve these issues", "work through the punch list", or "apply fixes".
+  It executes the red-green-commit loop for findings from the review-pipeline skill,
+  using isolated worktrees, adversarial Codex testing, and gate verification before committing.
 ---
 
 # Fix-and-Verify Skill
@@ -39,13 +41,13 @@ Execute the red-green-commit loop for one or more findings from `/review-pipelin
   --punch-list <file>   Path to punch-list file from /review-pipeline: either a
                         .review-state/<id>.json state file (preferred) or a JSON array
                         of finding objects. If a state file is provided, extract the
-                        findings array and filter to [CONFIRM] items.
-  --no-adversarial      Skip Codex Adversarial adversarial step (REJECTED if any finding is P0 or P1)
+                        findings array.
+  --no-adversarial      Skip Codex Adversarial step (REJECTED if any finding is P0 or P1)
   --worktree            Force git worktree isolation for all severities (default: always
                         use worktrees for P0/P1; use worktrees for P2/P3 only in batch
                         mode or when this flag is set; single P2/P3 findings without
                         this flag work in the current tree)
-  --max-attempts <N>    Override retry cap (default: 3). Valid range: 1-10.
+  --max-attempts <N>    Override retry cap (default: 3). Valid range: 1-10. Note: context levels cap at 3 regardless of --max-attempts; attempts beyond 3 repeat level 3 context.
 ```
 
 **Mutual exclusivity:** Exactly one of `--finding` or `--punch-list` must be provided. If both are given, error: "Only one of --finding or --punch-list may be specified." If neither is given, error: "No input provided. Use --finding or --punch-list."
@@ -54,11 +56,13 @@ Execute the red-green-commit loop for one or more findings from `/review-pipelin
 
 ## Finding Schema
 
-Finding objects must conform to the canonical schema defined in the review-pipeline skill. See `review-pipeline references/state-schema.md` for the full schema.
+Finding objects must conform to the canonical schema defined in the review-pipeline skill. See `review-pipeline/references/state-schema.md` for the full schema.
 
 Key fields used by this skill: `finding_id`, `severity`, `tag`, `category`, `file`, `line_start`, `line_end`, `symbol`, `description`, `expected_behavior`, `actual_behavior`, `reporters`, `auto_fixed`, `status`, `run_id`, `fixed_at`, `fixed_by_run`, `escalated_at`, `escalation_reason`.
 
-**Normalization:** If a finding contains a `reviewer` field (old schema v1 format) instead of `reporters`, convert it immediately: `reporters: [reviewer]`. Remove the `reviewer` field. Write the normalized form back to the state file before processing.
+**Normalization:** Apply migrations per `review-pipeline/references/state-schema.md` Migration Rules. Write the normalized form back to the state file before processing.
+
+**Error recording:** Whenever an error code is triggered (agent failure, gate crash, tool timeout, etc.), append an entry to the state file's `errors` array. See `review-pipeline/references/state-schema.md` for the error record schema. This builds a diagnostic history that persists across runs.
 
 ---
 
@@ -68,15 +72,15 @@ Perform all checks before processing any findings.
 
 ### 1. Parse Arguments
 
-Verify mutual exclusivity of `--finding` / `--punch-list`. If `--finding` is a file path, read the file and parse as JSON. If it is an inline string, parse directly. If `--punch-list` is given, read the file. If the file matches the `.review-state` schema (has `schema_version` and `findings` keys), extract the `findings` array. Otherwise, parse the file as a raw JSON array.
+Verify mutual exclusivity of `--finding` / `--punch-list`. If `--finding` is a file path, read the file and parse as JSON. If the file cannot be parsed as a JSON object, error: "Finding file [path] is not valid JSON. Expected a single finding object." If it is an inline string, parse directly. If `--punch-list` is given, read the file. If the file matches the `.review-state` schema (has `schema_version` and `findings` keys), extract the `findings` array. Otherwise, parse the file as a raw JSON array.
 
 **Schema version check:** If `schema_version` is `1`, proceed with normalization (step 2 will migrate it to v2). If `schema_version` is any other value besides `1` or `2`, error: "State file uses unsupported schema v[N]. Expected v1 or v2." and stop.
 
-**latest.json warning:** If the input path is `.review-state/latest.json`, warn: "Using latest.json -- this is a copy that may not reflect the most recent run. Prefer using a specific run state file (.review-state/<id>.json) if available."
+**latest.json warning:** If the input path is `.review-state/latest.json`, warn: "Using latest.json -- this is a copy that may not reflect the most recent run. Prefer using a specific run state file (.review-state/<id>.json) if available." Then proceed with processing the file.
 
-### 2. Normalize Reporters
+### 2. Normalize Schema
 
-For each finding, if `reviewer` (string) is present instead of `reporters` (array), convert: `reporters: [reviewer]`, remove `reviewer`. Write normalized form back to the state file. After normalization, set `schema_version` to `2` in the state file and write it back. This ensures the file is marked as v2 after migration.
+Apply migrations per `review-pipeline/references/state-schema.md` Migration Rules. After migration, set `schema_version` to `2` in the state file and write it back.
 
 ### 3. Validate Finding Schema
 
@@ -111,7 +115,7 @@ Process each finding's tag and status. First match wins:
 
 ### 6. Reject --no-adversarial if P0/P1 Present
 
-If `--no-adversarial` is passed and any finding has severity P0 or P1, stop immediately: "ERROR: --no-adversarial is not permitted when P0 or P1 findings are present. Codex Adversarial adversarial testing is mandatory for these severities."
+If `--no-adversarial` is passed and any finding has severity P0 or P1, stop immediately: "ERROR: --no-adversarial is not permitted when P0 or P1 findings are present. Codex Adversarial testing is mandatory for these severities."
 
 ### 7. Validate --max-attempts
 
@@ -162,6 +166,8 @@ Before any modifications, capture baselines in the worktree (or current tree).
 2. If `gate_6_post_autofix` / `gate_7_post_autofix` are null: use `gate_6_baseline` / `gate_7_baseline` from the state file.
 3. If no state file: run the lint tool and count warnings (store as `baseline_warnings`). If a coverage tool exists, run coverage on the finding's `file` and any files it directly imports (store as `baseline_coverage`, a map of file paths to coverage percentages).
 
+In batch mode with no state file, capture priority 3 baselines inside each finding's worktree before Step 1 for that finding.
+
 Store resolved baselines for use in Step 3 gates 6 and 7.
 
 ---
@@ -198,9 +204,9 @@ Spawn Agent A using the **Agent tool**.
 | 2 | 2+ | All of level 1, PLUS: failure output from the previous attempt's red-phase or green-phase check. |
 | 3 | 3+ | All of level 2, PLUS: public API surface (type signatures, function signatures, class definitions, callers, import structure). NOT the implementation body. |
 
-**Prompt Agent A with:** "You are writing a failing test for a bug report. [At level 1: You do NOT have access to the source code, only the bug description.] [At level 2-3: You also have prior attempt failure output and/or public API context.] Base the test on the bug description and expected behavior provided. Write a single focused test function that will FAIL given the current (broken) behavior and PASS once the bug is fixed. Place the test in the appropriate test directory for this stack. Name the test file `test_fix_<finding_id>.py` (Python) or `fix-<finding_id>.test.ts` (TS) or equivalent. Output only the test file content."
+**Prompt Agent A with:** "You are writing a failing test for a bug report. [At level 1: You do NOT have access to the source code, only the bug description.] [At level 2-3: You also have prior attempt failure output and/or public API context.] Base the test on the bug description and expected behavior provided. Write a single focused test function that will FAIL given the current (broken) behavior and PASS once the bug is fixed. Place the test in the appropriate test directory for this stack. Name the test file per stack convention: Python: `test_fix_<finding_id>.py`; TS/JS: `fix-<finding_id>.test.ts`; Go: `fix_<finding_id>_test.go` (in the same package directory); Rust: append a `#[cfg(test)] mod tests_fix_<finding_id>` block to the source file; Kotlin: `Fix<FindingId>Test.kt` in the test source root. Output only the test file content."
 
-If the Agent tool call returns an error or fails to return a result, report `AGENT_SPAWN_FAILED`, retry once. If still fails, escalate.
+If the Agent tool call returns an error or fails to return a result, report `AGENT_SPAWN_FAILED`, append an error record to the state file's `errors` array: `{ timestamp: "<now UTC>", stage: "step-1", error_code: "AGENT_SPAWN_FAILED", detail: "[error]", finding_id: "<id>", recovery: "retried" }`. Retry once (infrastructure retry -- does not consume an attempt from the outer loop). If still fails, update the error record's recovery to `"escalated"` and escalate immediately.
 
 **After Agent A completes:**
 - Write the test file to the worktree (or current tree).
@@ -248,7 +254,7 @@ Spawn Agent C using the **Agent tool**. Agent C runs all required gates using th
 
 | severity | required gates |
 |----------|---------------|
-| P0, P1 | 1, 2, 3, 5, 6, 7 (gate 4 advisory only, gate 5 advisory only) |
+| P0, P1 | 1, 2, 3, 6, 7 (gate 4 and gate 5 run but advisory -- never block. Gate 5 escalates to human if > 200 lines for P0/P1.) |
 | P2, P3 | 1, 2, 3, 6 |
 
 **Failure routing:**
@@ -260,8 +266,8 @@ Spawn Agent C using the **Agent tool**. Agent C runs all required gates using th
 | Gate 4 warns (API fuzz) | Log advisory | Gate 4 is advisory only. Report warnings but proceed. Never hard-fail. |
 | Gate 5 warns (patch too large) | Log advisory | If > 200 lines for P0/P1, escalate. |
 | Gate 6 or 7 fails (lint/coverage regression) | Return to Step 2 | Pass specific warnings/coverage delta as context. |
-| Tool timeout | Retry gate once | If still times out, report `TOOL_TIMEOUT` and escalate. |
-| Tool crash/flaky | Retry gate once | Same error = real failure. Different error = escalate. |
+| Tool timeout | Retry gate once | If still times out, report `TOOL_TIMEOUT`, append error record, and escalate. |
+| Tool crash/flaky | Retry gate once | Same error = real failure, append error record. Different error = append error record and escalate. |
 
 **Attempt counting:** The attempt loop owns the counter. Failure routing only determines which step the next iteration starts at. If all iterations are exhausted, escalate.
 
@@ -277,6 +283,8 @@ Agent C must report each gate result as `[PASS]`, `[FAIL]`, `[SKIP]`, or `[WARN]
 |----------|------|
 | P0, P1 | Codex Adversarial is mandatory. Do not proceed to Step 5 without it. |
 | P2, P3 | Codex Adversarial runs by default. Skip only if `--no-adversarial` was explicitly passed. |
+
+Note: Pre-flight step 6 has already rejected runs with `--no-adversarial` and P0/P1 findings. The table above confirms operational behavior -- no second rejection is needed here.
 
 Dispatch Codex Adversarial via the **Skill tool**: `codex-agent:dispatch`
 
@@ -306,16 +314,16 @@ After all gates pass and Codex Adversarial is satisfied (or skipped/unavailable 
 
 **5b. Write Status Back to State File (immediately after commit)**
 
-Write the following fields to the finding in `.review-state/<run_id>.json`:
+Write the following fields to the finding in the state file that was passed via `--punch-list` (path: `.review-state/<review_pipeline_run_id>.json`):
 - `status: "fixed"`
 - `fixed_at: <ISO 8601 timestamp (UTC)>`
-- `fixed_by_run: <run_id from the state file>` (the review-pipeline run that produced this finding)
+- `fixed_by_run: <top-level run_id from the state file>` (the review-pipeline run that produced this finding; fix-and-verify does not generate its own run_id)
 
 Then copy the updated state file to `.review-state/latest.json`.
 
 This write-back must happen immediately after each finding completes -- do not batch across multiple findings.
 
-If no state file exists (finding was passed via `--finding` with inline JSON, not a state file), skip the write-back and note it in the output report.
+If no state file exists (finding was passed via `--finding` with inline JSON): create a minimal state file at `.review-state/<generated-uuid>.json` with schema_version 2, the single finding, and a fresh run_id. Write status back to it. Also write `latest.json`. This enables future convergence even for ad-hoc single-finding invocations. Note: in this ad-hoc case, `fixed_by_run` will contain the generated UUID, not a review-pipeline run ID. This is an accepted deviation from the field's normal semantics.
 
 **5c. Report**
 
@@ -329,6 +337,7 @@ When a finding is escalated (all attempts exhausted or a hard failure), write im
 - `status: "escalated"`
 - `escalated_at: <ISO 8601 timestamp (UTC)>`
 - `escalation_reason: "Exhausted <N> attempts. Last failure: <step> -- <failure_type>."`
+- Append a final error record to `errors`: `{ timestamp: "<now UTC>", stage: "<step>", error_code: "<code>", detail: "Escalated after <N> attempts. Full attempt history in prior error records.", finding_id: "<id>", recovery: "escalated" }`
 
 Then copy the updated state to `.review-state/latest.json`.
 
@@ -338,7 +347,7 @@ This must happen at the point of escalation, not deferred to the end of the batc
 
 ## Stack Detection
 
-Use the same marker-file logic, stack table, and detection rules as defined in the review-pipeline skill (the canonical source). Do not redefine or reproduce the stack table here.
+Use the same marker-file logic, stack table, and detection rules as defined in the review-pipeline skill (canonical source: `review-pipeline/references/stack-table.md`). Do not redefine or reproduce the stack table here.
 
 Detection rules summary:
 - More specific markers win over generic ones.
@@ -366,7 +375,7 @@ After all findings are processed, output a full report:
 **Fix:** <file> -- <N> lines changed
   <unified diff>
 
-**Gates:** 1[x] 2[x] 3[x] 4[x] 5[x] 6[x] 7[x] D[x]
+**Gates:** 1[x] 2[x] 3[x] 4[x] 5[x] 6[x] 7[x] Adv[x] (Adv = Codex Adversarial)
 **Commit:** <hash>
 **Status:** VERIFIED | ESCALATED
 
@@ -378,6 +387,8 @@ After all findings are processed, output a full report:
 | <desc>  | <file:line> | P0 | 1/3 | 7/7 | PASS | VERIFIED |
 | <desc>  | <file:line> | P2 | 2/3 | 4/4 | SKIP | VERIFIED |
 | <desc>  | <file:line> | P0 | 3/3 | 3/7 | --  | ESCALATED |
+
+Codex Adversarial column: `PASS` = adversarial found no failures, `SKIP` = `--no-adversarial` passed, `--` = not reached (finding escalated before Step 4).
 
 ### Integration Status
 - Integration branch: fix-batch-<timestamp>

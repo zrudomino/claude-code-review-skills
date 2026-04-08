@@ -2,7 +2,7 @@
 
 ## Marker File Detection
 
-Use the Glob tool to check for each marker file. This works identically on Windows and Unix. In monorepos, recursively discover package roots by searching for marker files in subdirectories up to 3 levels deep. Run each detected stack's tools scoped to its package root.
+Use the Glob tool to check for each marker file. This works identically on Windows and Unix. In monorepos, recursively discover package roots by searching for marker files in subdirectories up to 3 levels deep. Run each detected stack's tools scoped to its package root. When a changed file is detected by multiple stack markers (e.g., a shared `types/` directory), run all matching stacks' tools on that file and union the findings.
 
 | Marker File | Stack Candidate |
 |-------------|-----------------|
@@ -18,13 +18,15 @@ For `package.json` projects, apply these rules in order (first match wins):
 
 | Condition | Classification |
 |-----------|---------------|
-| `vite.config.*` exists AND `react` NOT in dependencies | Vue/TS |
-| `vite.config.*` exists AND `react` in dependencies | React/TS |
+| `vite.config.*` exists AND `react` NOT in any dependencies section | Vue/TS |
+| `vite.config.*` exists AND `react` in any dependencies section | React/TS |
 | `next.config.*` exists | Next.js |
 | `react` in dependencies | React/TS |
 | `strapi` in dependencies | Strapi/Node |
 | `tsconfig.json` exists | Plain TS/Node |
 | None of the above | Plain JS/Node |
+
+**Note:** "in dependencies" means present in any of: `dependencies`, `devDependencies`, or `peerDependencies` in `package.json`. Read the file and check all dependency objects.
 
 ## Stack Tool Table
 

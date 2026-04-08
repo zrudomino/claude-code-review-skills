@@ -5,7 +5,10 @@
 ```
 for attempt = 1 to max_attempts (inclusive):
   context_level = min(attempt, 3)
-  run Step 1 with context_level  (or skip to Step 2 if failure routing says so)
+  if routing_from_previous_attempt != "skip-to-step-2":
+    run Step 1 with context_level
+  else:
+    skip to Step 2 (reuse existing test)
   if Step 1 fails (construction error, not behavioral): continue to next attempt
   run Step 2 with context_level
   if green phase fails: continue to next attempt
@@ -25,6 +28,8 @@ Context levels cap at 3 regardless of `--max-attempts`. Attempts beyond 3 repeat
 | 1 | 1 | Finding metadata only: `description`, `expected_behavior`, `actual_behavior`, `file` (path only -- not contents), `line_start`, `line_end`, `symbol`, `category`. No source code. | Failing test file + source file(s) under repair only. No bug description. No finding metadata. |
 | 2 | 2 | All of Level 1, PLUS: failure output from the previous attempt's red-phase or green-phase check (error messages, assertion text, stack traces). | All of Level 1, PLUS: the previous attempt's fix diff and the specific gate failure output that caused the retry. |
 | 3 | 3+ | All of Level 2, PLUS: public API surface of the module -- type signatures, function signatures, class definitions, callers of the affected symbol, import structure. NOT the implementation body. | All of Level 2, PLUS: public interfaces and type signatures of related modules. |
+
+**Budget note:** Construction failures (Agent A produces a broken test) consume one attempt from the budget. Users who expect N fix attempts may get fewer if construction failures occur. Consider setting `--max-attempts` higher than the minimum needed fix attempts.
 
 ## Failure Routing (Step 3 gates)
 

@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# local-security-scan/scan.sh  v0.7.0
+# local-security-scan/scan.sh  v0.8.0
 # Runs Semgrep, Gitleaks, and OSV-Scanner against a project.
 # Usage:  bash scan.sh [<project-root>]
+# Env vars:
+#   SEMGREP_SKIP=1 / GITLEAKS_SKIP=1 / OSV_SKIP=1 — skip the named scanner.
+#     A skipped scanner writes an empty-but-valid JSON file with `"skipped": true`,
+#     appends a "skipped (<name> bypassed via SKIP env var)" token to the RESULT
+#     line, and does NOT trigger exit 2. Exit 2 is reserved for genuine errors.
+#     Consumers that require a complete scan MUST check for skipped scanners
+#     and set their own completeness flag accordingly.
 # Exit:
-#   0 = all tools ran; no findings above threshold
+#   0 = all required tools ran; no findings above threshold (skipped scanners OK)
 #   1 = actionable findings present
-#   2 = setup/tool error (missing binary, crash, or timeout)
+#   2 = setup/tool error (missing binary, crash, or timeout — NOT a skip)
 
 set -u
 
@@ -96,6 +103,23 @@ FLAG_ERROR=0
 FLAG_MISSING=0
 TIMED_OUT=""
 
+# Track scanners skipped via *_SKIP env vars. Skips are visible in the RESULT
+# line but do not count as errors/missing/findings. Consumers (review-pipeline
+# Step 5A, fix-and-verify Gate 8) treat a skipped scanner as completeness=false
+# if the scan must be complete for their purposes.
+SKIPPED_SCANNERS=()
+
+# Emit a minimal but valid JSON file that marks a scanner as deliberately
+# skipped. Programmatic consumers can detect the skip via the `"skipped": true`
+# flag without parsing the RESULT line. Also writes a short human-readable
+# stderr stub so downstream tooling that expects the .stderr file to exist
+# does not error on missing file.
+write_skipped_report() {
+  local json_path="$1" stderr_path="$2" scanner="$3"
+  printf '{"skipped": true, "scanner": "%s", "results": []}\n' "$scanner" > "$json_path"
+  printf 'scanner %s skipped via %s_SKIP=1 env var\n' "$scanner" "$(echo "$scanner" | tr '[:lower:]' '[:upper:]')" > "$stderr_path"
+}
+
 echo "Local security scan  ->  $PROJECT"
 echo "Reports  ->  $OUT_DIR"
 [ -z "$TIMEOUT_PREFIX" ] && echo "note: 'timeout' not found — scanners will run without hang protection"
@@ -104,7 +128,12 @@ echo ""
 # ---------- Semgrep ----------
 # Semgrep returns 0 on success (with or without findings) when --metrics=off and
 # --quiet are both set. Any non-zero exit is a tool error.
-if command -v semgrep >/dev/null 2>&1; then
+if [ "${SEMGREP_SKIP:-0}" -eq 1 ]; then
+  echo "[1/3] Semgrep: SKIPPED (SEMGREP_SKIP=1)"
+  write_skipped_report "$OUT_DIR/semgrep.json" "$OUT_DIR/semgrep.stderr" "semgrep"
+  : > "$OUT_DIR/semgrep.stdout"
+  SKIPPED_SCANNERS+=("semgrep")
+elif command -v semgrep >/dev/null 2>&1; then
   echo "[1/3] Semgrep (SAST)..."
   PYTHONUTF8=1 PYTHONIOENCODING=utf-8 $TIMEOUT_PREFIX semgrep scan \
     --config p/default \
@@ -147,7 +176,12 @@ echo ""
 # ---------- Gitleaks ----------
 # Gitleaks exits 0 with --exit-code 0. Any non-zero is a tool error.
 # Respects $PROJECT/.gitleaksignore when cwd != project via --gitleaks-ignore-path.
-if command -v gitleaks >/dev/null 2>&1; then
+if [ "${GITLEAKS_SKIP:-0}" -eq 1 ]; then
+  echo "[2/3] Gitleaks: SKIPPED (GITLEAKS_SKIP=1)"
+  write_skipped_report "$OUT_DIR/gitleaks.json" "$OUT_DIR/gitleaks.stderr" "gitleaks"
+  : > "$OUT_DIR/gitleaks.stdout"
+  SKIPPED_SCANNERS+=("gitleaks")
+elif command -v gitleaks >/dev/null 2>&1; then
   echo "[2/3] Gitleaks (secrets)..."
   GITLEAKS_IGNORE_ARGS=()
   if [ -f "$PROJECT/.gitleaksignore" ]; then
@@ -200,7 +234,12 @@ echo ""
 # becomes rc=0 with valid JSON and is handled by normal parsing.
 # IMPORTANT: check rc before file size to avoid misclassifying a crashed run as
 # successful just because a partial JSON file was left behind.
-if command -v osv-scanner >/dev/null 2>&1; then
+if [ "${OSV_SKIP:-0}" -eq 1 ]; then
+  echo "[3/3] OSV-Scanner: SKIPPED (OSV_SKIP=1)"
+  write_skipped_report "$OUT_DIR/osv.json" "$OUT_DIR/osv.stderr" "osv-scanner"
+  : > "$OUT_DIR/osv.stdout"
+  SKIPPED_SCANNERS+=("osv-scanner")
+elif command -v osv-scanner >/dev/null 2>&1; then
   OSV_HAS_ALLOW_NO_LOCKFILES=0
   if osv-scanner scan source --help 2>/dev/null | grep -q -- '--allow-no-lockfiles'; then
     OSV_HAS_ALLOW_NO_LOCKFILES=1
@@ -257,8 +296,12 @@ fi
 echo ""
 
 # ---------- Result ----------
-# Three independent flags combined here so no state stomps another.
-# Exit code precedence: MISSING|ERROR -> 2, FINDINGS-only -> 1, nothing -> 0.
+# Four independent states are combined here so no state stomps another:
+# MISSING (scanner not installed), ERROR (scanner crashed/timed out), FINDINGS
+# (actionable output), SKIPPED (deliberately bypassed via *_SKIP env var).
+# Exit code precedence: MISSING|ERROR -> 2, FINDINGS-only -> 1, nothing or
+# skips-only -> 0. SKIPPED is always visible in the RESULT line (never hidden)
+# but never raises the exit code on its own (per Invariant 8).
 # Parts joined with "; " separator; no leading space, no trailing separator.
 
 RESULT_PARTS=()
@@ -275,6 +318,16 @@ fi
 if [ "$FLAG_FINDINGS" -gt 0 ]; then
   RESULT_PARTS+=("findings present (read JSON reports in $OUT_DIR)")
 fi
+# Append skipped scanners last so the reader sees error/finding state first,
+# then which scanners were deliberately bypassed.
+if [ "${#SKIPPED_SCANNERS[@]}" -gt 0 ]; then
+  # Join with comma without risking set -u on IFS expansion of empty arrays.
+  SKIPPED_LIST="${SKIPPED_SCANNERS[0]}"
+  for s in "${SKIPPED_SCANNERS[@]:1}"; do
+    SKIPPED_LIST="$SKIPPED_LIST,$s"
+  done
+  RESULT_PARTS+=("skipped ($SKIPPED_LIST bypassed via SKIP env var)")
+fi
 
 if [ "${#RESULT_PARTS[@]}" -eq 0 ]; then
   echo "RESULT: clean — no findings above threshold"
@@ -286,6 +339,17 @@ RESULT_MSG="${RESULT_PARTS[0]}"
 for part in "${RESULT_PARTS[@]:1}"; do
   RESULT_MSG="$RESULT_MSG; $part"
 done
+
+# Skip-only special case: if the ONLY condition is skipped scanners (no
+# findings, no errors, no missing tools), the run is still "clean" — prefix
+# the RESULT message to make that obvious and exit 0. This preserves the
+# "skip is not a failure" invariant while keeping every skipped scanner
+# visible on the RESULT line.
+if [ "$FLAG_FINDINGS" -eq 0 ] && [ "$FLAG_ERROR" -eq 0 ] && [ "$FLAG_MISSING" -eq 0 ]; then
+  echo "RESULT: clean — $RESULT_MSG"
+  exit 0
+fi
+
 echo "RESULT: $RESULT_MSG"
 
 if [ "$FLAG_MISSING" -gt 0 ] || [ "$FLAG_ERROR" -gt 0 ]; then

@@ -1,6 +1,6 @@
 ---
 name: local-security-scan
-version: 0.7.0
+version: 0.8.0
 description: >
   This skill should be used when the user asks to "scan for security issues",
   "check for CVEs", "look for secrets", "run a SAST scan", "security review
@@ -28,7 +28,7 @@ Run three local security scanners against a project and report prioritized findi
 5. **Never auto-fix findings.** Report only. A separate fix-and-verify pass decides what to change.
 6. **Never bypass ignore files.** Respect `.semgrepignore`, `.gitleaksignore`, `osv-scanner.toml` in the project root. See `examples/sample-output.md` for ignore-file formats.
 7. **Never scan a large dependency tree without warning the user first.** If the project root contains `node_modules`, `vendor`, `.venv`, or `target` as top-level directories, confirm the user wants those included before running — scans can take tens of minutes on dependency trees.
-8. **Never hide any part of a composite RESULT line.** `scan.sh` emits a single `RESULT:` line that can list MULTIPLE parts joined by `; ` when more than one condition holds — e.g. `RESULT: setup incomplete (some scanners missing); findings present (read JSON reports in .sec-scan)`. When reporting to the user, report EVERY part in that line. Do not hide findings because a tool was missing, and do not hide missing/errored tools because findings were found. Exit code precedence: missing or errored → exit 2; findings-only → exit 1; clean → exit 0. The RESULT line is authoritative; the exit code is a summary.
+8. **Never hide any part of a composite RESULT line.** `scan.sh` emits a single `RESULT:` line that can list MULTIPLE parts joined by `; ` when more than one condition holds — e.g. `RESULT: setup incomplete (some scanners missing); findings present (read JSON reports in .sec-scan)`. This also applies to deliberately-skipped scanners: `RESULT: clean — skipped (osv-scanner bypassed via SKIP env var)` means Semgrep and Gitleaks ran clean while OSV was bypassed via `OSV_SKIP=1`, and you MUST surface the skip when reporting to the user. Do not hide findings because a tool was missing, do not hide missing/errored tools because findings were found, and do not hide a skipped scanner because everything else was clean. Exit code precedence: missing or errored → exit 2; findings-only → exit 1; clean (or skips-only) → exit 0. A skipped scanner does NOT raise the exit code — it is observable only via the RESULT line and the `"skipped": true` flag in the corresponding JSON file. The RESULT line is authoritative; the exit code is a summary.
 
 ---
 
@@ -123,6 +123,19 @@ See `examples/sample-output.md` for a worked example of stdout output and a full
 ## Out of scope
 
 See `references/environment.md` for the full "what this skill does NOT cover" list. In brief: no auto-fix, no container/IaC scanning (use Trivy), no license compliance, no dynamic analysis, no manual-review replacement for crypto/auth/payments code.
+
+---
+
+## Consumers
+
+v0.8.0 added skip env vars so other skills can wire `scan.sh` into their own flows without paying the cost of scanners they don't need. Two known consumers live in this project:
+
+- **review-pipeline Step 5A ("Security Corpus Seeding")** — calls `bash scan.sh "$PROJECT"` during its pre-stage with `OSV_SKIP=1` when the diff touches no dependency manifest, normalizes the three JSON reports into review-pipeline's canonical finding schema, and uses the findings to seed Stage 1 agent prompts and escalate Stage 0 tier classification on fresh P0 secrets/CVEs. Canonical normalization rules live in `review-pipeline/references/security-corpus.md`.
+- **fix-and-verify Gate 8 ("Security Regression Delta")** — captures a `sec_baseline` at Step 0, runs `bash scan.sh` again between Step 4 (Codex Adversarial) and Step 5 (Commit), and blocks the commit loop if the delta contains *new* findings relative to baseline. Delta identity uses Semgrep's `match_based_id`, Gitleaks's `Fingerprint`, and an OSV tuple `(ecosystem, package, advisory_id, manifest_path)` — never raw line numbers. Full procedure in `fix-and-verify/references/security-gate-8.md`.
+
+**Skip env vars (v0.8.0+):** `SEMGREP_SKIP=1`, `GITLEAKS_SKIP=1`, `OSV_SKIP=1`. A skipped scanner writes an empty-but-valid JSON file with `{"skipped": true, "scanner": "<name>", "results": []}`, appends a `skipped (<name> bypassed via SKIP env var)` token to the RESULT line, and does NOT raise the exit code. Consumers that require a complete scan MUST check each JSON file for the `"skipped": true` flag and set their own completeness state accordingly — a skipped scanner is clean from scan.sh's perspective but incomplete from the consumer's perspective if the consumer needed that scanner to run.
+
+**Canonical finding schema** is owned by review-pipeline at `review-pipeline/references/state-schema.md`. The `reporters[]` array is always `["local-security-scan"]` for findings originating from this skill. See the normalization tables in `review-pipeline/references/security-corpus.md` (canonical) and `fix-and-verify/references/security-gate-8.md` (convenience copy) for the Semgrep/Gitleaks/OSV → canonical-finding mapping.
 
 ---
 

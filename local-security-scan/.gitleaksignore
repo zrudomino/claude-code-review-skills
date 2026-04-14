@@ -1,0 +1,6 @@
+# Historical false positive from commit 08d595e: an earlier version of
+# references/environment.md contained a literal high-entropy fake PAT as a
+# troubleshooting example. The doc has since been rewritten to describe the
+# pattern without embedding a matchable string, but gitleaks scans git
+# history, so that commit's occurrence is suppressed here by fingerprint.
+08d595ee4948e290640007107d4957fa845df6b6:local-security-scan/references/environment.md:github-pat:135

@@ -1,6 +1,6 @@
 ---
 name: fix-and-verify
-version: 0.2.0
+version: 0.3.0
 description: >
   This skill should be used when the user asks to "fix this finding", "fix and verify",
   "fix the punch list", "fix these review findings", "commit a fix for this bug",
@@ -29,6 +29,8 @@ Execute the red-green-commit loop for one or more findings from `/review-pipelin
 10. **Never process more than 8 findings in a single batch invocation.** Defer the remainder with an explicit message.
 11. **Never write finding status in a batch at the end.** Write status back to the state file immediately after each finding completes.
 12. **Never substitute an Agent tool call for a Codex dispatch.** Codex provides cross-model architectural diversity -- a Claude/Opus agent reviewing its own model family's work cannot catch the same blind spots. Always use `Skill: codex-agent:dispatch`, never the Agent tool, for Codex Adversarial testing.
+13. **Never proceed to Step 5 Commit if Gate 8 returned scan_incomplete.** Escalate immediately with SEC_SCAN_INCOMPLETE. Do NOT route back to Step 2 -- the fix itself may be correct, and the failure is in verification infrastructure (scanner timeout, tool error, missing scanner, or a required scanner was bypassed via env var when this run needed it). A silent pass on an incomplete Gate 8 is a hard invariant violation. See `references/security-gate-8.md` for the full Gate 8 procedure.
+14. **Never compare Gate 8 scan results across a matching_epoch boundary.** If `sec_scanner_versions` at Gate 8 scan time differ from those recorded in `sec_baseline` (captured at Step 0 or inherited from review-pipeline Step 5A), emit SEC_EPOCH_ADVANCED_MID_FIX and escalate. Do NOT attempt to match findings across scanner version changes -- the identity keys are unstable across epochs by design. A re-baseline is required, and the human operator decides whether to re-run the full flow against the new versions.
 
 ---
 
@@ -170,6 +172,28 @@ In batch mode with no state file, capture priority 3 baselines inside each findi
 
 Store resolved baselines for use in Step 3 gates 6 and 7.
 
+**Security baseline (`sec_baseline`) for Gate 8:**
+
+4. If the state file has non-null `sec_baseline` (inherited from review-pipeline Step 5A): use it directly. No re-scan. Record the inherited `sec_scanner_versions` for later epoch-boundary checks at Gate 8.
+5. Otherwise, capture a fresh baseline inside the worktree:
+   ```bash
+   bash ~/.claude/skills/local-security-scan/scan.sh "$WORKTREE_PATH"
+   ```
+   Parse the three JSON reports (`.sec-scan/semgrep.json`, `.sec-scan/gitleaks.json`, `.sec-scan/osv.json`) using the normalization table in `references/security-gate-8.md` (convenience copy of the canonical table in `review-pipeline/references/security-corpus.md`). Store the normalized findings as `sec_baseline` in the finding state, along with `sec_scanner_versions` and a fresh `matching_epoch` value.
+6. If the scan fails (`scan.sh` exit 2, or a required report file is missing, or a required scanner was skipped via env var): hard fail this finding with error code `SEC_BASELINE_FAILED`. Do NOT proceed to Step 1. A fix cannot be green-gated on a tree whose starting security state is unknown. Record the failure in `errors[]` with recovery `"escalated"`.
+
+`sec_baseline` structure:
+```json
+{
+  "semgrep": [<normalized_findings>],
+  "gitleaks": [<normalized_findings>],
+  "osv": [<normalized_findings>],
+  "captured_at": "<ISO>",
+  "complete": true
+}
+```
+`complete: false` is only emitted by review-pipeline Step 5A for a failed/incomplete scan and is treated as hard fail at Gate 8 (see Invariant 13 and `references/security-gate-8.md`).
+
 ---
 
 ### Attempt Loop
@@ -297,7 +321,26 @@ Dispatch Codex Adversarial via the **Skill tool**: `codex-agent:dispatch`
 | Dispatch fails (timeout, auth, network) for P0/P1 | Report `AGENT_D_DISPATCH_FAILED`. Hard failure -- escalate. |
 | Dispatch fails for P2/P3 | Report `AGENT_D_DISPATCH_FAILED`. Warn: "Codex Adversarial unavailable -- [error]. Proceeding without adversarial testing." Continue to Step 5. |
 | Codex Adversarial produces failing tests | Report to human with status ESCALATED. Do not proceed to Step 5. Do not commit. |
-| Codex Adversarial finds no failures | Proceed to Step 5. |
+| Codex Adversarial finds no failures | Proceed to Step 4.5 (Gate 8). |
+
+---
+
+### Step 4.5 -- Gate 8: Security Regression Delta
+
+After Step 4 approves and before the commit, run a delta security scan. Only candidates that passed every prior gate and the adversarial testing reach this point. This is the last line of defense against a fix that accidentally introduces a new secret, SAST finding, or vulnerable dependency.
+
+1. Run `bash ~/.claude/skills/local-security-scan/scan.sh "$WORKTREE_PATH"` inside the worktree.
+2. Run supplementary `gitleaks detect --staged --no-git --source "$WORKTREE_PATH"` to catch uncommitted / staged secrets that the history-oriented scan may miss.
+3. **Check scan completeness.** If the scan returns `complete=false` (exit 2, missing report file, timeout, or a required scanner was skipped via env var): hard fail → escalate immediately with `SEC_SCAN_INCOMPLETE`. Do NOT route back to Step 2. **Per Invariant 13**, the fix may be correct; the failure is in verification infrastructure.
+4. **Check matching_epoch.** If the `sec_scanner_versions` from this scan differ from those recorded in `sec_baseline`, emit `SEC_EPOCH_ADVANCED_MID_FIX` and escalate. **Per Invariant 14**, do NOT attempt to match findings across epoch boundaries.
+5. Parse the three JSON reports using the normalization table in `references/security-gate-8.md`. Compute the delta against `sec_baseline` using scanner-native identity keys (Semgrep `match_based_id`, Gitleaks `Fingerprint`, OSV tuple `ecosystem:package:advisory_id:manifest_path` — **never raw file+line**).
+6. Apply test-file exclusion: drop Semgrep findings whose `path` matches `test_*`, `*_test.*`, `*Test*`, or `tests/**` before computing the delta. Gitleaks scans the full tree; any test-file secret already present in `sec_baseline` is automatically WARN-only.
+7. **Delta evaluation:**
+   - If the delta is empty → Gate 8 passes, proceed to Step 5 (Commit).
+   - If the delta contains new findings → Gate 8 fails. **Consumes one attempt from the outer loop counter.** Route back to Step 2 with the new findings passed to Agent B as additional context: *"Your previous fix introduced these security findings — rewrite to avoid them: <list>."*
+   - If the outer loop is already at `max_attempts` when Gate 8 fails, escalate immediately with `SEC_GATE8_RETRY_EXHAUSTED`. Do NOT attempt another Step 2 iteration (Invariant 7: the attempt cap is hard).
+
+**Full procedure, identity keys, epoch rules, completeness handling:** `references/security-gate-8.md` (self-contained convenience copy, pointer to canonical `review-pipeline/references/gate-registry.md`).
 
 ---
 

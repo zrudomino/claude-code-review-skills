@@ -16,6 +16,7 @@ Last synced with canonical: 2026-04-08.
 | 5 | Patch size (advisory) | `git diff --stat` (unstaged) or `git diff --stat HEAD~1..HEAD` (after commit) -- count changed lines | 5s | Always advisory. Warn > 50 lines. Escalate (to human) if > 200 lines for P0/P1. No hard-fail for P2/P3. | N/A (always available) |
 | 6 | Lint + type check delta | Run detected lint tool + type checker (if stack has one; plain JS skips type check portion). Exit code 0 AND new_warnings <= `gate_6_baseline`. If exit code is non-zero due to errors (not warnings), gate fails unconditionally. If exit code is 0, count warnings and compare against baseline. | 120s | Exit code 0 AND new_warnings <= baseline_warnings | `TOOL_MISSING` -- escalate. If stack has no type checker, run lint only. |
 | 7 | Coverage delta on changed files | Run coverage tool scoped to changed files. Compare per-file coverage against `gate_7_baseline` per-file values. | 180s | Per-file coverage >= per-file baseline | `[SKIP]` if no coverage tool detected |
+| 8 | Security regression delta | `bash ~/.claude/skills/local-security-scan/scan.sh <worktree>` then compare against `sec_baseline` via scanner-native identity keys | 300s | Scan `complete=true` AND zero *new* security findings relative to `sec_baseline` via Semgrep `match_based_id` / Gitleaks `Fingerprint` / OSV tuple `(ecosystem, package, advisory_id, manifest_path)`. Pre-existing baseline findings do NOT block. | `TOOL_MISSING` -- escalate. A skipped scanner (via `*_SKIP` env var) is NOT a tool error but still sets completeness=false, which is a hard fail (Gate 8 cannot complete on an incomplete scan). See `references/security-gate-8.md` for the full procedure. |
 
 ## Gate 4: API Fuzz (Advisory Only)
 
@@ -30,8 +31,10 @@ Gate 4 (API fuzz smoke via schemathesis) is advisory only. It is NOT a required 
 
 | Severity | Required Gates |
 |----------|---------------|
-| P0, P1 | 1, 2, 3, 6, 7 (gate 4 and gate 5 run but advisory -- never block. Gate 5 escalates to human if > 200 lines for P0/P1.) |
-| P2, P3 | 1, 2, 3, 6 |
+| P0, P1 | 1, 2, 3, 6, 7, 8 (gate 4 and gate 5 run but advisory -- never block. Gate 5 escalates to human if > 200 lines for P0/P1.) |
+| P2, P3 | 1, 2, 3, 6, 8 |
+
+Gate 8 is required at all severities because a new secret / new CVE / new SAST ERROR on any fix is intolerable regardless of the original finding's severity. Gate 8 runs between Step 4 (Codex Adversarial) and Step 5 (Commit) -- see `references/security-gate-8.md` for the full procedure.
 
 ## Baseline Selection for Gates 6 and 7
 

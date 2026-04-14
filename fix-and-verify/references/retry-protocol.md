@@ -42,6 +42,9 @@ Failure routing determines which step the NEXT iteration starts at. The attempt 
 | Gate 4 (API fuzz) | Log advisory only | Gate 4 is advisory. Report warnings but always proceed. Never hard-fail. |
 | Gate 5 (patch size warn) | Log advisory only; if > 200 lines for P0/P1 escalate | Does not count as a gate failure for retry purposes. |
 | Gate 6 or 7 (lint/coverage regression) | Return to Step 2 | Pass specific warnings/coverage delta as context. |
+| Gate 8 (new security finding) | Return to Step 2, pass new findings as additional Agent B context | Consumes one attempt from the outer loop. At `max_attempts`, escalate with `SEC_GATE8_RETRY_EXHAUSTED`. |
+| Gate 8 scan incomplete | Escalate immediately with `SEC_SCAN_INCOMPLETE` | Do NOT return to Step 2 -- the fix may be correct; the failure is in verification infrastructure. See Invariant 13. |
+| Gate 8 matching_epoch advanced | Escalate immediately with `SEC_EPOCH_ADVANCED_MID_FIX` | Cross-epoch comparison is unsafe. See Invariant 14. Re-baseline required. |
 | Tool timeout | Retry gate once | If still times out, report `TOOL_TIMEOUT` and escalate. |
 | Tool crash / flaky | Retry gate once | If same error: count as real failure. If different error: escalate. |
 

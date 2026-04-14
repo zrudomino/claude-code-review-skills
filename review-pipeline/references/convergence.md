@@ -66,3 +66,49 @@ After each completed run, append a record to `run_history`:
 ```
 
 Stop Condition 4 requires `p3_only == true` AND `escalated_count == 0` in all 3 consecutive rounds.
+
+## Security finding convergence
+
+Findings sourced from `local-security-scan` (Step 5A and fix-and-verify Gate 8) use a different identity scheme from agent-discovered findings. They are still stored in the same `findings[]` array with the same schema, but they carry an additional `sec_identity_key` field and their `finding_id` is a deterministic UUID v5 keyed on that value, making identity stable across fresh-state runs.
+
+### Identity key formats
+
+| Source | `sec_identity_key` format | Why |
+|---|---|---|
+| Semgrep | `semgrep:<extra.fingerprint>` | Semgrep's own line-stable `match_based_id`. Survives line shifts from unrelated edits above the match. |
+| Gitleaks | `gitleaks:<Fingerprint>` | Gitleaks emits `<commit>:<path>:<RuleID>:<line>`, stable for the same finding in the same commit. |
+| OSV-Scanner | `osv:<ecosystem>:<package>:<advisory_id>:<manifest_path>` | **Version deliberately excluded.** Dep bumps inside a vulnerable range keep the same identity, preventing "trade CVE A for CVE B" churn in the delta. |
+
+The `finding_id` for scan-sourced findings is computed as `uuid5(sec_identity_key)`. This means Level 1 convergence matching works deterministically even for fresh state files: the same underlying security finding always produces the same `finding_id` as long as the `matching_epoch` has not advanced.
+
+### Level mapping for security findings
+
+| Level | Applies to security findings? | Notes |
+|---|---|---|
+| 1 (exact `finding_id`) | Yes, always | Works because `finding_id = uuid5(sec_identity_key)`. |
+| 2 (`file + category + line_drift <= 10`) | Yes for Semgrep and Gitleaks | Degrades to Level 1 for OSV findings, which have no line number. |
+| 3 (`file + symbol`) | Not recommended | Security findings rarely populate `symbol`. Do not rely on Level 3 for security finding matching. |
+
+### Matching epoch scope
+
+Security finding matches are scoped within a single `matching_epoch`. An epoch bump (any change in `sec_scanner_versions` between consecutive runs) invalidates identity-key stability — a Semgrep rule rename, a Gitleaks pattern update, or an OSV severity reclassification can cause the same underlying finding to produce a different `sec_identity_key` under the new versions.
+
+On an epoch bump:
+1. Append `SEC_EPOCH_ADVANCED` to `errors[]` with the before/after version details.
+2. Re-ingest all security findings as fresh (status `dismissed`, `dismissed_reason: "sec_baseline"`).
+3. Security findings from the previous epoch are dropped from the convergence match set — they do not count against regression detection or stop conditions.
+4. Agent-discovered findings are unaffected by epoch bumps.
+
+### Tombstoning for absent security findings
+
+A scan-sourced finding that was present in the baseline but is absent from the current scan is NOT immediately marked `fixed`. Two-phase promotion prevents "dep-bump trades one CVE for another" from looking like a resolve in round N and a fresh finding in round N+1:
+
+1. **First absence** (round N): The finding's `status` stays `dismissed` but `dismissed_reason` flips from `"sec_baseline"` to `"sec_resolved_pending"`. Record an updated `dismissed_at`.
+2. **Second absence** (round N+1, consecutive): If still absent, promote to `status: "fixed"`, set `fixed_at`, clear `dismissed_reason`. Now the finding is truly resolved.
+3. **Reappearance between N and N+1:** If the finding reappears in round N+1 (e.g., a dep was bumped and then reverted), reset `dismissed_reason` back to `"sec_baseline"` and continue tracking normally.
+
+This applies only to security findings (`sec_identity_key` non-null). Agent-discovered findings use the normal `open → fixed` transition driven by fix-and-verify.
+
+### Stop condition interaction
+
+Scan-sourced findings start as `dismissed` (not `open`), so they do NOT count against Stop Condition 1 (the "zero open `[CONFIRM]` / `[CONFLICT]`" condition). A project with 20 pre-existing Semgrep warnings will still converge normally as long as no NEW security findings appear and no agent-discovered findings remain open. A genuinely new security finding, however, is inserted with `status: "open"` (not dismissed) and DOES count against Stop Condition 1, so it blocks convergence until fix-and-verify addresses it.

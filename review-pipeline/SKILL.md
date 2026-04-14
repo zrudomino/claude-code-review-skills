@@ -1,6 +1,6 @@
 ---
 name: review-pipeline
-version: 0.2.0
+version: 0.3.0
 description: >
   This skill should be used when the user asks to "review my code", "run a code review",
   "review this PR", "check my diff", "analyze these changes", "do a security review",
@@ -13,7 +13,7 @@ description: >
 
 You are executing a multi-stage code review pipeline. Follow each stage precisely. The pipeline flow is:
 
-**Parse Arguments -> Resume? (if --resume) -> Lock -> Convergence Check -> Pre-Stage -> Stage 0 -> Stage 1 -> Stage 2 -> Stage 3 -> Stage 4 -> Output -> Cleanup**
+**Parse Arguments -> Resume? (if --resume) -> Lock -> Convergence Check -> Pre-Stage -> Stage 5A (Security Corpus Seeding) -> Stage 0 -> Stage 1 -> Stage 2 -> Stage 3 -> Stage 4 -> Output -> Cleanup**
 
 ## Invariants -- Never Violate These
 
@@ -26,6 +26,7 @@ You are executing a multi-stage code review pipeline. Follow each stage precisel
 7. **Gate 4 (API fuzz) is advisory only.** It never blocks the pipeline.
 8. **Never substitute an Agent tool call for a Codex dispatch.** Codex provides cross-model architectural diversity -- a Claude/Opus agent reviewing its own model family's work cannot catch the same blind spots. Always use `Skill: codex-agent:dispatch`, never the Agent tool, for Codex Adversarial testing.
 9. **Gate 5 (patch size) is advisory for P2/P3 and conditionally escalating for P0/P1.** It never causes a retry loop. Escalate (to human) if > 200 lines for P0/P1.
+10. **Never treat `scan_incomplete` as a clean result.** `sec_baseline.complete=false` (from Step 5A) means one or more scanners timed out, errored, were missing, or were skipped via env var when they were required for this run. Step 5A MUST append a `SEC_SCAN_INCOMPLETE` entry to `errors[]` and propagate `complete=false` through the state file. Downstream stages (Stage 1 prompt augmentation, Stage 0 tier escalation) and any consuming skill (fix-and-verify Gate 8) MUST treat an incomplete baseline as unreliable and MUST NOT use it as the basis for a delta comparison. A silent pass on an incomplete scan is a hard invariant violation — the whole point of Step 5A is to surface what the static scanner found, and "found nothing" is not the same as "scanner didn't run."
 
 ## Parse Arguments
 
@@ -119,6 +120,16 @@ Run each detected stack's tools scoped to its package root. In monorepos, discov
 
 When creating a new state file (not resuming), populate these fields: `run_id` (generate UUID), `branch_name` (from `git rev-parse --abbrev-ref HEAD`), `base_commit` (from `git merge-base HEAD <default_branch>`), `diff_fingerprint` (from `git diff HEAD [-- <paths>] | git hash-object --stdin`), `created_at` and `updated_at` (current ISO timestamp), `errors: []` (empty array — will accumulate diagnostic records during the run).
 
+## Step 5A: Security Corpus Seeding
+
+After Pre-Stage correctness gates pass and before Stage 0 classification, run `local-security-scan` to seed the finding corpus with SAST / secret / CVE findings that review agents cannot reliably detect. Findings are inserted as `status: "dismissed", dismissed_reason: "sec_baseline"` on first sight so they do not count against convergence stop condition 1 or block fix-and-verify Gate 8.
+
+**Skip OSV** if the diff touches no dependency manifest. **Tier-escalate** via `sec_escalate_tier` if a P0 secret or P0 CVE is seen (Stage 0 reads the flag). **Respect invariant 10**: an incomplete scan is NEVER a clean result.
+
+**Full procedure, normalization table, dependency-manifest list, per-source quota rules, and `sec_escalate_tier` decision logic:** `references/security-corpus.md`.
+
+**Write state file: update `findings[]`, `sec_baseline`, `sec_scanner_versions`, `matching_epoch`, `sec_escalate_tier`. Set `updated_at` to the current ISO timestamp. Update lock `written_at` and `stage_reached` to `"stage-5a"`. Mark `"stage-5a"` in `stages_completed`.**
+
 ## Stage 0: Change Classification
 
 Get the diff:
@@ -156,6 +167,15 @@ Classify into one of three tiers:
 | `--lightweight` or `--standard` passed but diff contains Critical-pattern files | Error: "This diff contains Critical-tier files ([list]). Use `--critical` or remove the force flag." |
 | `--critical` passed regardless of diff content | Always accepted |
 
+**Security tier escalation (reads `sec_escalate_tier` from Step 5A):** After the base classification above, if `sec_escalate_tier == true` in the state file, upgrade the tier:
+
+| Trigger | Upgrade |
+|---------|---------|
+| P0 `secrets` finding in Step 5A baseline | `Lightweight \| Standard → Standard` (never downgrade; Critical stays Critical) |
+| P0 `dependency-cve` finding in Step 5A baseline | `Lightweight \| Standard → Critical` (never downgrade) |
+
+Bulk Semgrep warnings do NOT trigger escalation — only confirmed P0 secrets or critical CVEs. Append the escalation rationale to the classification record: *"Tier escalated to X by Step 5A `sec_escalate_tier` flag — finding: `<finding_id>` (`<category>`)"*. See `references/security-corpus.md` for the full decision logic.
+
 **Write classification and `files_scope` to state file. Set `updated_at` to the current ISO timestamp before writing. Update lock `written_at` and `stage_reached` to `"stage-0"`. Mark `"stage-0"` in `stages_completed`.**
 
 ## Stage 1: Parallel Broad Scan
@@ -167,6 +187,16 @@ git diff HEAD [-- <paths>]
 ```
 
 Launch agents in parallel based on tier. Send the diff as context to each agent. All agents for a tier must be launched in a SINGLE message with multiple Agent tool calls.
+
+**Inject Step 5A baseline context into each agent prompt.** If `sec_baseline` is non-null AND `sec_baseline.complete == true`, append the following block to each agent's prompt (cap at 10 findings by severity, regardless of total count, to bound token use):
+
+> The following {N} pre-existing security findings have already been detected by local-security-scan. Do NOT re-report them — focus your effort on issues a static scanner cannot find: logic bugs, design flaws, auth-by-omission, concurrency hazards. Findings: {top-10 by severity, each as `finding_id | category | file:line_start`}.
+
+If `sec_baseline.complete == false`, append instead:
+
+> The Step 5A security baseline is INCOMPLETE (scanner timeout, error, or required scanner skipped — see `errors[]`). Do not assume any static scanner has covered this diff. Pay extra attention to injection sinks, credential handling, and newly-added dependencies.
+
+Do NOT inject anything if `sec_baseline` is null (e.g., Step 5A has not yet run on a resumed pipeline — this is an error path that should already have been caught upstream).
 
 **Lightweight -- 2 agents in parallel:**
 

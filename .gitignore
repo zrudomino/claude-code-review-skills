@@ -1,3 +1,4 @@
 .review-state/
 *.lock
 .claude/*.local.md
+.sec-scan/

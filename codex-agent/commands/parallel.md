@@ -1,0 +1,223 @@
+---
+name: codex-agent:parallel
+description: Dispatch a task to multiple Codex models in parallel
+argument-hint: <task description>
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - AskUserQuestion
+---
+
+# Codex Agent — Parallel Dispatch
+
+You are dispatching a coding task to multiple Codex models in parallel to compare their results. Follow these steps precisely.
+
+## Input
+
+The task to dispatch: `$ARGUMENTS`
+
+## Step 0: Preflight Check
+
+Verify that Codex CLI is installed:
+
+```bash
+codex --version
+```
+
+If this fails with "not found", "not recognized", or similar error, stop immediately with:
+
+> **Codex CLI not found.** Please install it first:
+> ```
+> npm install -g @openai/codex
+> ```
+> Then run `codex auth` to authenticate.
+
+Do not proceed to any subsequent steps.
+
+## Step 1: Validate Input
+
+If `$ARGUMENTS` is empty or missing, respond with:
+> Please provide a task description. Usage: `/codex-agent:parallel <task description>`
+Then stop.
+
+## Step 2: Load Configuration
+
+Read the config file at `~/.claude/codex-agent/config.json`.
+
+Extract these values:
+- `defaults.codexModel` (default: null)
+- `defaults.timeout` (default: 300000)
+
+## Step 3: Budget Check
+
+Run the budget check:
+
+```bash
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = ut.checkBudget(ledger, config, 'codex'); console.log(JSON.stringify(result));"
+```
+
+- If `allowed` is `false`: Report the budget reason to the user and stop.
+- If `sessionPercent` or `lifetimePercent` is > 80: Warn that budget is running high. Note that parallel dispatch uses more tokens than a single dispatch. Ask the user if they want to proceed.
+
+## Step 4: Select Models
+
+Determine which models to run in parallel:
+
+**If `defaults.codexModel` is set to a non-null value**:
+- Model A = the configured model
+- Model B = default (no `-m` flag — Codex's built-in default)
+- Tell the user: "Running parallel dispatch: **[configured model]** vs **Codex default**"
+
+**If `defaults.codexModel` is null** (no model configured):
+- Use AskUserQuestion to ask which models to compare:
+  - Question: "Which models should we compare in parallel?"
+  - Options:
+    1. **o3-mini + o4-mini** — Compare two mini models
+    2. **o4-mini + gpt-4.1** — Compare mini vs full model
+    3. **o3-mini + gpt-4.1** — Compare mini vs full model
+  - If the user chooses "Other", parse their custom input for model names
+
+Save the two model names (use `null` for "Codex default" / no `-m` flag).
+
+## Step 5: Write and Run Parallel Script
+
+Write a temporary Node.js script that uses `parallel.js` to spawn concurrent Codex processes:
+
+```bash
+node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); console.log(path.join(dir, 'parallel-' + Date.now() + '.js'));"
+```
+
+Save the temp script path. Then write the script using the Write tool:
+
+```javascript
+var p = require('C:/Users/RJ/.claude/codex-agent/lib/parallel.js');
+var parser = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js');
+var fs = require('fs');
+
+var tasks = [
+  { prompt: <TASK_PROMPT>, model: <MODEL_A_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS> },
+  { prompt: <TASK_PROMPT>, model: <MODEL_B_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS> }
+];
+
+p.dispatchParallel(tasks, {}, function(err, results) {
+  if (err) {
+    console.log(JSON.stringify({ error: err.message || String(err) }));
+    process.exit(1);
+  }
+  // Parse each result's stdout through parse-output
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (r.stdout) {
+      var parsed = parser.parseCodexOutput(r.stdout, r.result);
+      r.parsedResult = parsed.result;
+      r.parsedUsage = parsed.usage;
+      r.parsedFilesChanged = parsed.filesChanged;
+      r.parsedStatus = parsed.status || r.status;
+    } else {
+      r.parsedResult = r.result || '';
+      r.parsedUsage = r.usage || { inputTokens: 0, outputTokens: 0, estimatedCost: 0 };
+      r.parsedFilesChanged = r.filesChanged || [];
+      r.parsedStatus = r.status || 'unknown';
+    }
+    // Clean up stdout to reduce output size
+    delete r.stdout;
+  }
+  console.log(JSON.stringify(results));
+});
+```
+
+Replace `<TASK_PROMPT>`, `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>`, and `<TIMEOUT_MS>` with actual values. Use `null` (not a string) for models that should use Codex's default.
+
+Run the script:
+
+```bash
+node "<temp-script-path>"
+```
+
+**Timeout**: Use the configured timeout + 30 seconds (to allow for startup overhead) as the Bash timeout.
+
+## Step 6: Parse Results
+
+Parse the JSON output from the script. Each element in the array corresponds to a model.
+
+For each result, extract:
+- `parsedResult` — the response text
+- `parsedUsage` — `{ inputTokens, outputTokens, estimatedCost }`
+- `parsedFilesChanged` — array of changed files
+- `parsedStatus` — "completed", "error", "timeout"
+- `durationMs` — execution time
+- `model` — which model was used
+- `error` — error message if any
+
+## Step 7: Record Usage
+
+Record the **combined** usage from all parallel runs:
+
+```bash
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <TOTAL_INPUT>, outputTokens: <TOTAL_OUTPUT>, estimatedCost: <TOTAL_COST> }); console.log('recorded');"
+```
+
+Sum `inputTokens`, `outputTokens`, and `estimatedCost` across all parallel results.
+
+## Step 8: Create and Save Session
+
+Create a session and save it:
+
+```bash
+node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = sl.createSession('parallel', process.argv[1]); console.log(JSON.stringify(session));" "$ARGUMENTS"
+```
+
+Populate the session with:
+- `session.type` = "parallel"
+- `session.model` = comma-separated list of models used
+- `session.rounds` = one entry per model with `{ prompt, response (truncated to 2000), usage, timestamp }`
+- `session.result` = combined result with status and total usage
+- `session.error` = null (or error if all models failed)
+
+Save the session using the same pattern as dispatch.md Step 9e.
+
+## Step 9: Present Results
+
+Present a side-by-side comparison:
+
+---
+
+### Parallel Dispatch Results
+
+**Task**: [the original task description]
+
+#### Model A: [model-name or "Codex default"]
+- **Status**: [completed/error/timeout]
+- **Response**: [response text]
+- **Files Changed**: [list or "none"]
+- **Tokens**: [N] | **Cost**: $[X.XX] | **Time**: [N]s
+
+#### Model B: [model-name or "Codex default"]
+- **Status**: [completed/error/timeout]
+- **Response**: [response text]
+- **Files Changed**: [list or "none"]
+- **Tokens**: [N] | **Cost**: $[X.XX] | **Time**: [N]s
+
+**Comparison**:
+- **Faster**: [model] ([N]s vs [N]s)
+- **Cheaper**: [model] ($[X.XX] vs $[X.XX])
+- **More Complete**: [your assessment based on response quality]
+
+**Combined Token Usage**:
+- Input: [N] tokens
+- Output: [N] tokens
+- Total: [N] tokens
+- Estimated Cost: $[X.XX]
+
+**Session ID**: [session id]
+
+---
+
+## Important Notes
+
+- Always use forward slashes in file paths passed to `node -e`, even on Windows.
+- Never use backtick characters inside `node -e` command strings.
+- Parallel dispatch uses more tokens than a single dispatch — warn users about budget impact.
+- The temp script file can be cleaned up after execution but is left for debugging if needed.
+- If one model fails but the other succeeds, still present both results — the user can see which model performed better.

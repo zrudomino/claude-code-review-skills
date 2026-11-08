@@ -1,0 +1,96 @@
+{
+  "type": "object",
+  "required": ["summary", "overall_severity", "findings", "stats", "limitations"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Brief overall summary of the review"
+    },
+    "overall_severity": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high", "critical"],
+      "description": "Highest severity level among all findings"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "severity", "category", "confidence", "file_path", "line_start", "line_end", "description", "evidence", "suggested_fix"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique finding identifier (e.g. F1, F2)"
+          },
+          "title": {
+            "type": "string",
+            "description": "Short title for the finding"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          },
+          "category": {
+            "type": "string",
+            "enum": ["bug", "security", "performance", "style", "maintainability", "correctness", "error-handling", "other"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "file_path": {
+            "type": "string",
+            "description": "Relative path to the file"
+          },
+          "line_start": {
+            "type": "integer",
+            "description": "Starting line number"
+          },
+          "line_end": {
+            "type": "integer",
+            "description": "Ending line number"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description of the issue"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Code snippet or evidence of the issue"
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "Recommended fix or improvement"
+          }
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["files_reviewed", "findings_count", "diff_scope"],
+      "additionalProperties": false,
+      "properties": {
+        "files_reviewed": {
+          "type": "integer",
+          "description": "Number of files reviewed"
+        },
+        "findings_count": {
+          "type": "integer",
+          "description": "Total number of findings"
+        },
+        "diff_scope": {
+          "type": "string",
+          "description": "Description of what was reviewed (e.g. 'uncommitted changes', 'main..HEAD')"
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Any limitations or caveats about the review"
+    }
+  }
+}

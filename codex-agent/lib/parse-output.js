@@ -203,6 +203,11 @@ function subtractUsage(current, previous) {
     out[f] = current[f] - prev[f];
   }
   if (out.inputTokens < 0 || out.outputTokens < 0) return null;
+  // A later round that omits cost (or cached tokens) while an earlier round reported
+  // it would subtract to a negative value and lower the recorded spend. Treat the
+  // missing value as unknown (0), never as a refund.
+  if (out.estimatedCost < 0) out.estimatedCost = 0;
+  if (out.cachedInputTokens < 0) out.cachedInputTokens = 0;
   return out;
 }
 

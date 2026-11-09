@@ -47,7 +47,8 @@ If the file does not exist, create the directory and write the default config:
     "approvalPolicy": "full-auto",
     "sandbox": "workspace-write",
     "preferredAgent": "auto",
-    "timeout": 300000
+    "timeout": 300000,
+    "codexProfile": "lean"
   },
   "routing": {
     "largeContextThreshold": 5000,
@@ -167,7 +168,7 @@ If `$ARGUMENTS` is `reset`:
    - Options: "Yes, reset to defaults" / "Cancel"
 2. If confirmed, write the default config (shown above) to `~/.claude/codex-agent/config.json` using an atomic write:
    ```bash
-   node -e "var fs = require('fs'); var path = require('path'); var config = { budgets: { codex: { maxTokensPerSession: 500000, maxCostPerSession: 5.00, maxTokensTotal: 5000000, maxCostTotal: 50.00 }, claudeSubagent: { maxTokensPerSession: 200000, maxCostPerSession: 3.00, maxTokensTotal: 2000000, maxCostTotal: 30.00 } }, discussion: { softCapRounds: 5, hardCapRounds: 8 }, defaults: { codexModel: null, approvalPolicy: 'full-auto', sandbox: 'workspace-write', preferredAgent: 'auto', timeout: 300000 }, routing: { largeContextThreshold: 5000, budgetWarningPercent: 80, historyEnabled: true, historyMaxEntries: 500 }, cache: { enabled: true, ttlMs: 3600000, maxEntries: 100 }, dashboard: { enabled: false, conversationsDir: null } }; var configPath = 'C:/Users/RJ/.claude/codex-agent/config.json'; var tmpPath = configPath + '.tmp-' + process.pid; fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf-8'); fs.renameSync(tmpPath, configPath); console.log('done');"
+   node -e "var fs = require('fs'); var path = require('path'); var config = { budgets: { codex: { maxTokensPerSession: 500000, maxCostPerSession: 5.00, maxTokensTotal: 5000000, maxCostTotal: 50.00 }, claudeSubagent: { maxTokensPerSession: 200000, maxCostPerSession: 3.00, maxTokensTotal: 2000000, maxCostTotal: 30.00 } }, discussion: { softCapRounds: 5, hardCapRounds: 8 }, defaults: { codexModel: null, approvalPolicy: 'full-auto', sandbox: 'workspace-write', preferredAgent: 'auto', timeout: 300000, codexProfile: 'lean' }, routing: { largeContextThreshold: 5000, budgetWarningPercent: 80, historyEnabled: true, historyMaxEntries: 500 }, cache: { enabled: true, ttlMs: 3600000, maxEntries: 100 }, dashboard: { enabled: false, conversationsDir: null } }; var configPath = 'C:/Users/RJ/.claude/codex-agent/config.json'; var tmpPath = configPath + '.tmp-' + process.pid; fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf-8'); fs.renameSync(tmpPath, configPath); console.log('done');"
    ```
 3. Respond: "Configuration reset to defaults."
 4. If cancelled, respond: "Reset cancelled." and stop.
@@ -200,6 +201,7 @@ If `$ARGUMENTS` contains `=`:
    - `defaults.preferredAgent` must be one of: `"auto"`, `"codex"`, `"claudeSubagent"`
    - `defaults.approvalPolicy` must be one of: `"full-auto"`, `"suggest"`, `"ask"`
    - `defaults.timeout` must be >= 10000
+   - `defaults.codexProfile` must be `"lean"` (use `~/.codex/lean.config.toml`, the default when the key is missing) or `"full"` (the user's normal Codex config). A single call can still override lean with a leading `--full` in its arguments.
    - `cache.ttlMs` must be >= 60000 (1 minute minimum)
    - `cache.maxEntries` must be >= 1
    - `routing.historyMaxEntries` must be >= 10

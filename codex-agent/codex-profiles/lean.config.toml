@@ -1,0 +1,58 @@
+# Codex CLI profile "lean" for headless codex-agent calls (Codex CLI 0.167.0).
+# Deploy: copy to ~/.codex/lean.config.toml. Use: `codex -p lean exec ...`.
+# A profile file is layered over ~/.codex/config.toml (top-level keys, not a
+# [profiles.lean] table: --profile stopped reading those in 0.134.0).
+# Interactive Codex and the Desktop app are unaffected unless they pass -p lean.
+#
+# Kept on purpose: shell, git, file reading, AGENTS.md, and the pdf + spreadsheets
+# skills (a review may need to read a PDF or Excel file). Everything else is off.
+# Decided with the user 2026-11-09; see memory/HANDOVER-2026-11-09-0149.md.
+
+# Web access: all three routes must go, or Codex browses through the others
+# (tested 2026-11-08: with only web_search off it used codex-app-tools'
+# web_run and node_repl).
+web_search = "disabled"
+
+# Computer-use turn-ended helper (time per turn, no tokens).
+notify = []
+
+# ChatGPT-account connectors ("codex_apps" MCP: chatgpt_space, document control,
+# pets, ... and search_service, the web route Codex used when web_search was
+# off). Not the same thing as the codex-app-tools plugin below.
+[features]
+apps = false
+
+[mcp_servers.openaiDeveloperDocs]
+enabled = false
+
+# Browser REPL. Only safe to disable together with the browser and
+# computer-use plugins below: their end-of-turn hooks call node_repl.
+[mcp_servers.node_repl]
+enabled = false
+
+# Browser / desktop automation
+[plugins."browser@openai-bundled"]
+enabled = false
+
+[plugins."computer-use@openai-bundled"]
+enabled = false
+
+[plugins."unified-computer-use@openai-bundled"]
+enabled = false
+
+# Web search service (codex_apps.search_service.web_run) and other app tools
+[plugins."codex-app-tools@openai-bundled"]
+enabled = false
+
+# File-format and creative skills not needed for code review / consults
+[plugins."visualize@openai-bundled"]
+enabled = false
+
+[plugins."documents@openai-primary-runtime"]
+enabled = false
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = false
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = false

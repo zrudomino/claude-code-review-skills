@@ -58,6 +58,17 @@ Then write the default config.json with these values:
 
 Also extract the `defaults.codexModel` value for use in Step 6.
 
+## Step 2b: Select Codex Profile
+
+Codex loads every enabled plugin, MCP server and connector into each model step. The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `codex-agent/codex-profiles/lean.config.toml`) switches off browser/desktop automation, all web access (native search, OpenAI docs MCP, ChatGPT connectors) and most file-format skills. It keeps shell, git, file reading, AGENTS.md and the pdf + spreadsheets skills. Measured on Codex 0.167.0: a trivial call fell from 17,140 to 12,695 input tokens and a bounded consult from ~43.3K to ~33.6K, with the same answers and the same review finding.
+
+1. **Per-call override**: if `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix. From here on, wherever `$ARGUMENTS` appears (routing, cache key, prompts, logs), use the task text **without** the prefix.
+2. Otherwise `PROFILE` = `defaults.codexProfile` from config (default `"lean"` when missing).
+3. If `PROFILE` is `lean`, check that the profile file exists: `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`). If it is missing, tell the user "lean Codex profile not installed; using the full config" and set `PROFILE=full`.
+4. `PROFILE_FLAG` = `-p lean` for lean, empty for full. Every Codex command in Step 6 starts `codex <PROFILE_FLAG> exec`: `-p` is a global option and must come **before** `exec`.
+
+Use `--full` when the task needs web search, the OpenAI docs, browser/desktop automation, ChatGPT connectors, or document/slide/visualization skills. On `codex exec review` the profile is accepted and runs correctly, but its effect can't be measured there (review mode reports 0 tokens).
+
 ## Step 3: Budget Check
 
 Run this budget check (use forward slashes in the path, no backticks in the string):
@@ -74,7 +85,7 @@ node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'
 If the config has `cache.enabled` set to `true`, check the cache before routing:
 
 ```bash
-node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var cacheDir = 'C:/Users/RJ/.claude/codex-agent/cache'; var key = c.computeKey(process.argv[1], process.argv[2]); var result = c.lookup(cacheDir, key, config.cache ? config.cache.ttlMs : 3600000); result.key = key; console.log(JSON.stringify(result));" "$ARGUMENTS" "<current-working-directory>"
+node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var cacheDir = 'C:/Users/RJ/.claude/codex-agent/cache'; var key = c.computeKey(process.argv[1] + ' [codex-profile:' + process.argv[3] + ']', process.argv[2]); var result = c.lookup(cacheDir, key, config.cache ? config.cache.ttlMs : 3600000); result.key = key; console.log(JSON.stringify(result));" "$ARGUMENTS" "<current-working-directory>" "<PROFILE>"
 ```
 
 If `hit` is `true`:
@@ -168,44 +179,48 @@ This is the default path — unchanged from before.
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex exec --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
 ```
 
 ### Step 6b: Pure Diff Review (`IS_REVIEW` is true, `IS_FOCUSED` is false)
 
-Use `codex exec review` with minimal safe flags. Note: `codex exec review` does **NOT** support `-C` or `--output-schema` flags, but **DOES** support `-o, --output-last-message <FILE>` on modern Codex CLI versions. Codex reviews the repo at the process's current working directory (which is already the project dir). The user's `$ARGUMENTS` are **not** passed as the prompt — however, `codex exec review` does accept an optional trailing `[PROMPT]` argument for formatting instructions. Structured output is prompt-instructed (best-effort) — `parseReviewOutput()` handles parse failures gracefully.
+**If `config.review.useOutputSchema` is `true`: do NOT use `codex exec review`.** On Codex CLI 0.167.0 a custom `[PROMPT]` cannot be combined with `--uncommitted`, `--base` or `--commit` (verified: "the argument '--uncommitted' cannot be used with '[PROMPT]'"), and `exec review` accepts `--output-schema` but **ignores it** (verified 2026-11-09: a schema review of a commit returned plain review text, not JSON), so review mode cannot produce structured output. Instead, run the Step 6c `--output-schema` command (API-enforced JSON; verified: strict JSON that `parseReviewOutput` accepts) with this **pure-diff review prompt** in place of the focused-review template:
+
+```
+You are performing a code review of <SCOPE>. Collect the changes yourself with read-only commands: <SCOPE_COMMANDS>. Review only what these changes introduce: correctness, security, error handling and regressions. For each issue provide severity, category, file path, line numbers, description, evidence and a suggested fix. If there are no issues, say so explicitly. Do NOT modify any files. Requester's note: <$ARGUMENTS>
+```
+
+- `review.defaultMode` `"uncommitted"` (default): `<SCOPE>` = `the uncommitted changes in this repository (staged, unstaged and untracked files)`; `<SCOPE_COMMANDS>` = `git status --short, git diff HEAD, and reading any untracked files that git status lists`.
+- `review.defaultMode` `"base"`: `<SCOPE>` = `the changes on this branch relative to <review.baseBranch>`; `<SCOPE_COMMANDS>` = `git diff <review.baseBranch>...HEAD`.
+
+Then skip the rest of this step and continue with the Step 6c `--output-schema` command, **but with `--sandbox read-only` in place of `--sandbox workspace-write`**: a diff review must not modify files, and the sandbox should enforce that rather than the prompt. Then Step 6e.
+
+**If `config.review.useOutputSchema` is `false`** (or not set), use `codex exec review` with minimal safe flags. Note: `codex exec review` does **NOT** support `-C`; it accepts `--output-schema` but ignores it (see above), and it **DOES** support `-o, --output-last-message <FILE>`. Codex reviews the repo at the process's current working directory (which is already the project dir). Pass **no** prompt: the user's `$ARGUMENTS` are not passed, and a prompt is rejected together with the review-target flags below. `parseReviewOutput()` handles the non-JSON review text gracefully.
 
 **Base commands** — always include `--json` and the review mode flag:
 
 **If `review.defaultMode` is `"uncommitted"` (default)**:
 ```bash
-codex exec review --json --output-last-message "<lastMsg-temp-path>" --uncommitted
+codex <PROFILE_FLAG> exec review --json --output-last-message "<lastMsg-temp-path>" --uncommitted
 ```
 
 **If `review.defaultMode` is `"base"`**:
 ```bash
-codex exec review --json --output-last-message "<lastMsg-temp-path>" --base "<review.baseBranch>"
+codex <PROFILE_FLAG> exec review --json --output-last-message "<lastMsg-temp-path>" --base "<review.baseBranch>"
 ```
-
-**If `config.review.useOutputSchema` is `true`**, append a schema-instructing prompt to the command to request structured JSON output:
-```bash
-codex exec review --json --output-last-message "<lastMsg-temp-path>" --uncommitted "Output your review as JSON matching this schema: { summary: string, overall_severity: 'none'|'low'|'medium'|'high'|'critical', findings: [{ id: string, title: string, severity: 'low'|'medium'|'high'|'critical', category: 'bug'|'security'|'performance'|'style'|'maintainability'|'correctness'|'error-handling'|'other', confidence: 'low'|'medium'|'high', file_path: string, line_start: integer, line_end: integer, description: string, evidence: string, suggested_fix: string }], stats: { files_reviewed: integer, findings_count: integer, diff_scope: string }, limitations: string[] }"
-```
-
-**If `config.review.useOutputSchema` is `false`** (or not set), omit the prompt — let Codex use its default review format.
 
 Include `-m "<codexModel>"` if `codexModel` from config is not null.
 
 **Fallback**: If `codex exec review` fails with an "unknown command", "unknown flag", or similar error indicating the review subcommand is not supported, **fall through to Step 6c** (focused review fallback) using the original `$ARGUMENTS` as the prompt.
 
-### Step 6c: Focused Review (`IS_REVIEW` is true, `IS_FOCUSED` is true — or fallback from 6b)
+### Step 6c: Focused Review (`IS_REVIEW` is true, `IS_FOCUSED` is true — or from 6b)
 
-Use standard `codex exec` with a review prompt template. Construct the prompt by wrapping `$ARGUMENTS` in a review-focused template:
+Use standard `codex exec` with a review prompt template. When arriving from Step 6b because `useOutputSchema` is true, use the pure-diff review prompt defined there and the `--output-schema` command below. Otherwise construct the prompt by wrapping `$ARGUMENTS` in a review-focused template:
 
 ```
 You are performing a focused code review. Focus: <$ARGUMENTS>. Instructions: - Prioritize reviewing diff/changed files if available. - Report only issues relevant to the requested focus. - For each issue provide: severity (low/medium/high/critical), category, file path, line numbers, description, evidence, and suggested fix. - If no issues are found, state that explicitly. - Output your findings as JSON with keys: summary (string), overall_severity (none/low/medium/high/critical), findings (array of objects), stats (object with files_reviewed count, findings_count, and diff_scope string).
@@ -215,12 +230,12 @@ Then run:
 
 **If `config.review.useOutputSchema` is `true`**, include `--output-schema` to enforce structured JSON output via the API:
 ```bash
-codex exec --sandbox workspace-write --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
 ```
 
 **If `config.review.useOutputSchema` is `false`** (or not set), omit `--output-schema`:
 ```bash
-codex exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
 ```
 
 Include `-m "<codexModel>"` if `codexModel` from config is not null.
@@ -360,6 +375,7 @@ Where `<entry-json>` is a JSON string with the cache entry shape:
 - `status`: "completed"
 - `cachedAt`: `Date.now()` epoch milliseconds
 - `model`: the RESOLVED_MODEL from Step 6e (the actual model, not null)
+- `profile`: PROFILE from Step 2b (the cache key already includes it, so a `--full` call never gets a lean result)
 
 If this step fails, log the error but do not stop — caching is optional.
 
@@ -402,6 +418,7 @@ Present the results to the user. **Use a review-specific format if `IS_REVIEW` i
 
 **Status**: [completed/error/unknown]
 **Reviewed by**: [ACTUAL_AGENT from Step 6e — e.g. "Codex CLI (model: gpt-5.2)"]
+**Codex profile**: [PROFILE from Step 2b: lean or full]
 
 **Response**:
 [The result text from Codex]
@@ -438,6 +455,7 @@ node -e "var p = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js');
 
 **Status**: [completed/error/unknown] | **Severity**: [overall_severity]
 **Reviewed by**: [ACTUAL_AGENT from Step 6e — e.g. "Codex CLI (model: gpt-5.2)"]
+**Codex profile**: [PROFILE from Step 2b: lean or full]
 
 **Summary**: [summary text]
 

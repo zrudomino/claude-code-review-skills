@@ -19,15 +19,23 @@ var os = require("os");
 
 /**
  * Build the command arguments array for a single codex exec invocation.
- * @param {object} task - { prompt, model, workingDir, timeout }
+ * @param {object} task - { prompt, model, workingDir, timeout, profile } — profile: a Codex
+ *   profile name such as "lean" ($CODEX_HOME/<name>.config.toml); null or "full" = user config
  * @param {string} lastMsgPath - Path for --output-last-message
  * @returns {string[]} Array of arguments for spawn
  */
 function buildCommand(task, lastMsgPath) {
+  var args = [];
+
+  // -p is a global option and must come before `exec` (Codex 0.167.0).
+  if (task.profile && task.profile !== "full") {
+    args.push("-p", task.profile);
+  }
+
   // `--full-auto` was removed from Codex (0.167.0 rejects it: "unexpected argument").
   // Its sandbox half is `--sandbox workspace-write`, the same mode dispatch.md uses;
   // approvals do not apply to non-interactive `codex exec`.
-  var args = ["exec", "--sandbox", "workspace-write", "--json"];
+  args.push("exec", "--sandbox", "workspace-write", "--json");
 
   if (task.model) {
     args.push("-m", task.model);

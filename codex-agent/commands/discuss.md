@@ -53,6 +53,18 @@ Extract these values (with defaults if missing):
 - `defaults.timeout` (default: 300000)
 - `defaults.codexModel` (default: null)
 - `routing.budgetWarningPercent` (default: 80)
+- `defaults.codexProfile` (default: `"lean"`)
+
+### Step 2b: Select Codex Profile (once per discussion)
+
+The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `codex-agent/codex-profiles/lean.config.toml`) switches off browser/desktop automation, all web access and most file-format skills; it keeps shell, git, file reading, AGENTS.md and the pdf + spreadsheets skills. Measured on 0.167.0: a bounded consult fell from ~43.3K to ~33.6K input tokens with the same recommendations.
+
+1. If `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix; from here on use the topic text **without** the prefix wherever `$ARGUMENTS` appears (session creation, prompts, summaries).
+2. Otherwise `PROFILE` = `defaults.codexProfile` (default `"lean"`).
+3. If `PROFILE` is `lean` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, tell the user "lean Codex profile not installed; using the full config" and set `PROFILE=full`.
+4. `PROFILE_FLAG` = `-p lean` for lean, empty for full. It goes **before** `exec` in every Codex command below.
+
+**Keep the same `PROFILE_FLAG` for every round of this discussion**: round 1, resumed rounds, the full-context fallback and the execution step. Resuming a lean thread without it re-adds the full tool set and misses the prompt cache (measured: 23,233 new input tokens instead of 12,721). Use `--full` when the topic needs web search, the OpenAI docs or browser automation.
 
 ### Step 3: Budget Check
 
@@ -133,12 +145,12 @@ Run codex exec with this prompt.
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex exec --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
 ```
 
 **Sandbox**: all discussion rounds (this round, resumed rounds in Step 6a, and the full-context fallback in Step 6b) run `read-only`, so the sandbox enforces the "Do NOT write or modify any code" instruction instead of relying on the prompt. Codex can still read files and run read-only commands. Only the execution step (Step 10) uses `workspace-write`.
@@ -233,7 +245,7 @@ Please respond to this feedback. Revise your proposal if needed, or defend your 
 
 **If `sessionId` is available**, run:
 ```bash
-codex exec resume <sessionId> --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" "<follow-up-prompt>"
+codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" "<follow-up-prompt>"
 ```
 
 **Sandbox on resume**: `codex exec resume` has no `-s/--sandbox` flag, so without the `-c 'sandbox_mode=...'` override a resumed round inherits `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). Always pass the override. Verified on 0.167.0: with the override set to `read-only` a write attempt in a resumed round was blocked; without it the write succeeded.
@@ -272,9 +284,9 @@ Tool budget: use at most 3 tool calls this round; rely on the discussion summary
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning.
 ```
 
-Run with `codex exec --sandbox read-only --json` (not resume):
+Run with `codex <PROFILE_FLAG> exec --sandbox read-only --json` (not resume):
 ```bash
-codex exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<full-context-prompt>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<full-context-prompt>"
 ```
 
 **Important**: Summarize each prior round concisely (2-3 sentences each) rather than forwarding full text. This keeps Codex's context window manageable and avoids token waste.
@@ -352,7 +364,7 @@ Generate new temp files for the execution round (Step 4a pattern). Both `lastMsg
 If the `sessionId` (Codex session ID) from the last discussion round is not null, use `codex exec resume` to execute within the existing session context. Codex already has the full discussion history, so use a **short execution prompt**:
 
 ```bash
-codex exec resume <sessionId> --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" "<execution-prompt>"
+codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" "<execution-prompt>"
 ```
 
 The `-c 'sandbox_mode="workspace-write"'` override is required: resume has no `-s/--sandbox` flag and would otherwise inherit `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). `workspace-write` matches the fresh-exec fallback in Step 10c.
@@ -373,7 +385,7 @@ Include `-m "<codexModel>"` after `--json` if codexModel is not null.
 If `codex exec resume` fails (session not found, resume not supported) or `sessionId` is null, fall back to a fresh `codex exec` with full context:
 
 ```bash
-codex exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<execution-task>"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<execution-task>"
 ```
 
 Include `-m "<codexModel>"` if codexModel is not null. The execution task should include the full agreed approach from the discussion since Codex won't have prior context.
@@ -414,7 +426,7 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 ### Codex Discussion Result
 
 **Topic**: [the original topic]
-**Discussed with**: Codex CLI (model: [RESOLVED_MODEL from Step 3b])
+**Discussed with**: Codex CLI (model: [RESOLVED_MODEL from Step 3b], profile: [PROFILE from Step 2b])
 
 **Discussion Rounds**: [N]
 
@@ -445,7 +457,7 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 ### Codex Discussion Summary
 
 **Topic**: [the original topic]
-**Discussed with**: Codex CLI (model: [RESOLVED_MODEL from Step 3b])
+**Discussed with**: Codex CLI (model: [RESOLVED_MODEL from Step 3b], profile: [PROFILE from Step 2b])
 
 **Discussion Rounds**: [N] (stopped at [soft cap/hard cap/user request])
 

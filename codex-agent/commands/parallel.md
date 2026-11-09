@@ -48,6 +48,11 @@ Read the config file at `~/.claude/codex-agent/config.json`.
 Extract these values:
 - `defaults.codexModel` (default: null)
 - `defaults.timeout` (default: 300000)
+- `defaults.codexProfile` (default: `"lean"`)
+
+## Step 2b: Select Codex Profile
+
+Same rule as `/codex-agent:dispatch` Step 2b: if `$ARGUMENTS` starts with `--full`, set `PROFILE="full"` and use the task text without that prefix from here on; otherwise `PROFILE` = `defaults.codexProfile`. If `PROFILE` is `"lean"` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, warn the user and use `"full"`. Both tasks get the same `profile`, so the comparison is between models only.
 
 ## Step 3: Budget Check
 
@@ -96,8 +101,8 @@ var parser = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js');
 var fs = require('fs');
 
 var tasks = [
-  { prompt: <TASK_PROMPT>, model: <MODEL_A_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS> },
-  { prompt: <TASK_PROMPT>, model: <MODEL_B_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS> }
+  { prompt: <TASK_PROMPT>, model: <MODEL_A_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> },
+  { prompt: <TASK_PROMPT>, model: <MODEL_B_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> }
 ];
 
 p.dispatchParallel(tasks, {}, function(err, results) {

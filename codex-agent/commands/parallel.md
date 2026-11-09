@@ -140,7 +140,7 @@ p.dispatchParallel(tasks, {}, function(err, results) {
       r.parsedSessionId = parsed.sessionId; // Codex thread id, for the plan-usage line in Step 9
     } else {
       r.parsedResult = r.result || '';
-      r.parsedUsage = r.usage || { inputTokens: 0, outputTokens: 0, estimatedCost: 0 };
+      r.parsedUsage = r.usage || { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, estimatedCost: 0 };
       r.parsedFilesChanged = r.filesChanged || [];
       r.parsedStatus = r.status || 'unknown';
     }
@@ -167,7 +167,7 @@ Parse the JSON output from the script. Each element in the array corresponds to 
 
 For each result, extract:
 - `parsedResult` — the response text
-- `parsedUsage` — `{ inputTokens, outputTokens, estimatedCost }`
+- `parsedUsage` — `{ inputTokens, cachedInputTokens, outputTokens, estimatedCost }`
 - `parsedFilesChanged` — array of changed files
 - `parsedStatus` — "completed", "error", "timeout"
 - `durationMs` — execution time
@@ -179,10 +179,10 @@ For each result, extract:
 Record the **combined** usage from all parallel runs:
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <TOTAL_INPUT>, outputTokens: <TOTAL_OUTPUT>, estimatedCost: <TOTAL_COST> }); console.log('recorded');"
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <TOTAL_INPUT>, cachedInputTokens: <TOTAL_CACHED_INPUT>, outputTokens: <TOTAL_OUTPUT>, estimatedCost: <TOTAL_COST> }); console.log('recorded');"
 ```
 
-Sum `inputTokens`, `outputTokens`, and `estimatedCost` across all parallel results.
+Sum `inputTokens`, `cachedInputTokens`, `outputTokens`, and `estimatedCost` across all parallel results.
 
 ## Step 8: Create and Save Session
 

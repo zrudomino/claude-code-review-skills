@@ -344,10 +344,10 @@ Save the `sessionId` value (may be null) — it can be used by `/codex-agent:dis
 Record the token usage from this dispatch:
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <INPUT_TOKENS>, outputTokens: <OUTPUT_TOKENS>, estimatedCost: <COST> }); console.log('recorded');"
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <INPUT_TOKENS>, cachedInputTokens: <CACHED_INPUT_TOKENS>, outputTokens: <OUTPUT_TOKENS>, estimatedCost: <COST> }); console.log('recorded');"
 ```
 
-Replace `<INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with the actual values from Step 8.
+Replace `<INPUT_TOKENS>`, `<CACHED_INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with the actual values from the Step 8 `usage`.
 
 ### Step 9b: Dashboard Bridge
 

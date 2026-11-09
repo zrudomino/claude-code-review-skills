@@ -14,20 +14,28 @@ var fs = require("fs");
 var path = require("path");
 var os = require("os");
 
+// cachedInputTokens is the part of inputTokens served from Codex's prompt cache
+// (recorded since 2026-11-09; ledger.cachedTrackedSince marks when a ledger began).
+var COUNTER_FIELDS = ["inputTokens", "cachedInputTokens", "outputTokens", "estimatedCost", "dispatches"];
+
+function zeroAgent() {
+  var entry = {};
+  for (var i = 0; i < COUNTER_FIELDS.length; i++) entry[COUNTER_FIELDS[i]] = 0;
+  return entry;
+}
+
+function freshSession() {
+  return { startedAt: new Date().toISOString(), codex: zeroAgent(), claudeSubagent: zeroAgent() };
+}
+
 /**
  * Fresh ledger with zeroed counters.
  */
 function freshLedger() {
   return {
-    session: {
-      startedAt: new Date().toISOString(),
-      codex: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 },
-      claudeSubagent: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 }
-    },
-    lifetime: {
-      codex: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 },
-      claudeSubagent: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 }
-    }
+    session: freshSession(),
+    lifetime: { codex: zeroAgent(), claudeSubagent: zeroAgent() },
+    cachedTrackedSince: new Date().toISOString()
   };
 }
 
@@ -35,11 +43,10 @@ function freshLedger() {
  * Ensure an agent entry has all required fields (migration safety).
  */
 function ensureAgentFields(entry) {
-  if (!entry) return { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 };
-  if (typeof entry.inputTokens !== "number") entry.inputTokens = 0;
-  if (typeof entry.outputTokens !== "number") entry.outputTokens = 0;
-  if (typeof entry.estimatedCost !== "number") entry.estimatedCost = 0;
-  if (typeof entry.dispatches !== "number") entry.dispatches = 0;
+  if (!entry) return zeroAgent();
+  for (var i = 0; i < COUNTER_FIELDS.length; i++) {
+    if (typeof entry[COUNTER_FIELDS[i]] !== "number") entry[COUNTER_FIELDS[i]] = 0;
+  }
   return entry;
 }
 
@@ -60,6 +67,7 @@ function loadLedger(ledgerPath) {
     ledger.lifetime.codex = ensureAgentFields(ledger.lifetime.codex);
     ledger.lifetime.claudeSubagent = ensureAgentFields(ledger.lifetime.claudeSubagent);
     if (!ledger.session.startedAt) ledger.session.startedAt = new Date().toISOString();
+    if (!ledger.cachedTrackedSince) ledger.cachedTrackedSince = new Date().toISOString();
     return ledger;
   } catch (e) {
     return freshLedger();
@@ -118,35 +126,34 @@ function checkBudget(ledger, config, agent) {
  * Writes atomically via temp file + rename.
  * @param {string} ledgerPath - Absolute path to usage-ledger.json
  * @param {string} agent - "codex" or "claudeSubagent"
- * @param {{ inputTokens: number, outputTokens: number, estimatedCost: number }} usage
+ * @param {{ inputTokens: number, cachedInputTokens?: number, outputTokens: number, estimatedCost: number }} usage
+ *   One call's own usage (for a resumed round: the parse result's `usage`, never `threadTotals`).
  * @returns {object} The updated ledger
  */
 function recordUsage(ledgerPath, agent, usage) {
   var ledger = loadLedger(ledgerPath);
-  var inputTokens = usage.inputTokens || 0;
-  var outputTokens = usage.outputTokens || 0;
-  var cost = usage.estimatedCost || 0;
+  var add = {
+    inputTokens: usage.inputTokens || 0,
+    cachedInputTokens: usage.cachedInputTokens || 0,
+    outputTokens: usage.outputTokens || 0,
+    estimatedCost: usage.estimatedCost || 0,
+    dispatches: 1
+  };
+  var scopes = [ledger.session[agent], ledger.lifetime[agent]];
+  for (var s = 0; s < scopes.length; s++) {
+    for (var i = 0; i < COUNTER_FIELDS.length; i++) scopes[s][COUNTER_FIELDS[i]] += add[COUNTER_FIELDS[i]];
+  }
+  writeLedger(ledgerPath, ledger);
+  return ledger;
+}
 
-  // Increment session counters
-  ledger.session[agent].inputTokens += inputTokens;
-  ledger.session[agent].outputTokens += outputTokens;
-  ledger.session[agent].estimatedCost += cost;
-  ledger.session[agent].dispatches += 1;
-
-  // Increment lifetime counters
-  ledger.lifetime[agent].inputTokens += inputTokens;
-  ledger.lifetime[agent].outputTokens += outputTokens;
-  ledger.lifetime[agent].estimatedCost += cost;
-  ledger.lifetime[agent].dispatches += 1;
-
-  // Atomic write: temp file + rename
+/** Atomic write: temp file + rename. */
+function writeLedger(ledgerPath, ledger) {
   var dir = path.dirname(ledgerPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   var tmpPath = ledgerPath + ".tmp-" + process.pid + "-" + Math.random().toString(16).slice(2);
   fs.writeFileSync(tmpPath, JSON.stringify(ledger, null, 2), "utf-8");
   fs.renameSync(tmpPath, ledgerPath);
-
-  return ledger;
 }
 
 /**
@@ -156,18 +163,8 @@ function recordUsage(ledgerPath, agent, usage) {
  */
 function resetSession(ledgerPath) {
   var ledger = loadLedger(ledgerPath);
-  ledger.session = {
-    startedAt: new Date().toISOString(),
-    codex: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 },
-    claudeSubagent: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, dispatches: 0 }
-  };
-
-  var dir = path.dirname(ledgerPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  var tmpPath = ledgerPath + ".tmp-" + process.pid + "-" + Math.random().toString(16).slice(2);
-  fs.writeFileSync(tmpPath, JSON.stringify(ledger, null, 2), "utf-8");
-  fs.renameSync(tmpPath, ledgerPath);
-
+  ledger.session = freshSession();
+  writeLedger(ledgerPath, ledger);
   return ledger;
 }
 

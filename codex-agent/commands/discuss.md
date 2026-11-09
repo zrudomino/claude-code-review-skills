@@ -123,7 +123,7 @@ Save the session object (particularly the `id`) — you will populate it with ro
 You will now enter a discussion loop with Codex. Track these variables across rounds:
 - **roundNumber**: starts at 1
 - **discussionHistory**: array of `{ round, codexProposal, claudeEvaluation }` objects
-- **cumulativeUsage**: running totals of `{ inputTokens, outputTokens, estimatedCost }` across all rounds
+- **cumulativeUsage**: running totals of `{ inputTokens, cachedInputTokens, outputTokens, estimatedCost }` across all rounds (each round's parse result `usage`, never `threadTotals`)
 - **converged**: boolean, starts false
 
 ### Step 4: Round 1 — Initial Proposal
@@ -196,17 +196,17 @@ Save stdout to the stdout temp file, then parse:
 node -e "var p = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js'); var fs = require('fs'); var lastMsg = ''; try { lastMsg = fs.readFileSync('<lastMsg-temp-path>', 'utf-8'); } catch(e) {} var stdout = ''; try { stdout = fs.readFileSync('<stdout-temp-path>', 'utf-8'); } catch(e) {} var prev = process.argv[1] ? JSON.parse(process.argv[1]) : null; var result = p.parseCodexOutput(stdout, lastMsg, prev); console.log(JSON.stringify(result));" '<previous-threadTotals-json-or-empty>'
 ```
 
-**The argument**: pass `''` (empty) for a fresh `codex exec` — this round, the Step 6b fallback and the Step 10c fallback each start a new thread. For a **resumed** round (Step 6a, Step 10b) pass the previous round's `threadTotals` as JSON, e.g. `'{"inputTokens":2157179,"cachedInputTokens":2043520,"outputTokens":7313,"totalTokens":2164492,"estimatedCost":0}'`. Reason: `codex exec resume` reports the thread's cumulative usage, so without it every resumed round would be recorded again on top of all earlier rounds. The result's `usage` is then this round only (`usageMode: "delta"`); `usageMode: "raw-fallback"` means the totals went down and `usage` was left as reported — note it in the session.
+**The argument**: pass `''` (empty) for a fresh `codex exec` — this round, the Step 6b fallback and the Step 10c fallback each start a new thread. For a **resumed** round (Step 6a, Step 10b) pass the previous round's `threadTotals` as JSON, exactly as the parse result gave it, e.g. `'{"inputTokens":2157179,"cachedInputTokens":2043520,"outputTokens":7313,"totalTokens":2164492,"estimatedCost":0,"threadId":"01a1be4c-8df3-7150-bc19-9743e4c47bec"}'` (numbers and a thread id only, so it is safe on the command line). Reason: `codex exec resume` reports the thread's cumulative usage, so without it every resumed round would be recorded again on top of all earlier rounds. The result's `usage` is then this round only (`usageMode: "delta"`); `usageMode: "raw-fallback"` means the totals went down and `usage` was left as reported; `usageMode: "new-thread"` means the totals you passed belong to another Codex thread (e.g. resume silently started a new one) and nothing was subtracted; `usageMode: "delta-unverified"` means the output carried no thread id, so the subtraction assumes the resumed thread. Note any of these in the session. Usage is taken from the final `turn.completed` event (`usageSource: "final-event"`), which on 0.167.0 is the only event carrying usage.
 
 Save the `sessionId` and the `threadTotals` from the parse result (`sessionId` may be null). Both are used by the next resumed round.
 
 #### 4d: Record Round 1 Usage
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <INPUT_TOKENS>, outputTokens: <OUTPUT_TOKENS>, estimatedCost: <COST> }); console.log('recorded');"
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <INPUT_TOKENS>, cachedInputTokens: <CACHED_INPUT_TOKENS>, outputTokens: <OUTPUT_TOKENS>, estimatedCost: <COST> }); console.log('recorded');"
 ```
 
-Replace `<INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with actual values from the parse result's `usage` (this round only), never from `threadTotals`.
+Replace `<INPUT_TOKENS>`, `<CACHED_INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with actual values from the parse result's `usage` (this round only), never from `threadTotals`.
 
 Add the usage to your running cumulativeUsage totals.
 

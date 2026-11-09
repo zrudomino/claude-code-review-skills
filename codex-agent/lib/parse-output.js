@@ -14,22 +14,34 @@
 /**
  * Parse Codex JSONL stdout + optional last-message file content into a structured result.
  *
- * `codex exec resume` reports the THREAD's cumulative usage in turn.completed, not the
- * resumed round's own share (verified on 0.167.0: two identical resumed rounds reported
- * 51,968 then 88,026 input tokens; each round's own share was ~35K). When resuming,
- * pass the previous round's `threadTotals` as `previousTotals` so `usage` covers this
- * round only; feed this call's `threadTotals` into the next resumed round.
+ * Usage comes from the LAST `turn.completed` event (or legacy `task_complete`). On 0.167.0
+ * that event is the only one carrying usage, and its numbers are the THREAD's running
+ * total, not the turn's own share (verified: two identical resumed rounds reported 51,968
+ * then 88,026 input tokens; each round's own share was ~35K; the rollout file's
+ * total_token_usage agrees). Summing several such events would count earlier turns again,
+ * so the final one wins. Events of other types that carry usage (older Codex versions) are
+ * summed only when no final event exists.
+ *
+ * When resuming, pass the previous round's `threadTotals` as `previousTotals` so `usage`
+ * covers this round only; feed this call's `threadTotals` into the next resumed round.
+ * `threadTotals.threadId` records which thread the totals belong to: totals from another
+ * thread are never subtracted.
  *
  * @param {string} stdout - Raw JSONL output from `codex exec --json`
  * @param {string|null} lastMessageContent - Content of --output-last-message file, or null
  * @param {object|null} [previousTotals] - `threadTotals` from the previous round of the same thread (resume only)
- * @returns {{ result: string, usage: object, threadTotals: object, usageMode: string, filesChanged: string[], status: string, sessionId: string|null }}
+ * @returns {{ result: string, usage: object, threadTotals: object, usageMode: string, usageSource: string, filesChanged: string[], status: string, sessionId: string|null }}
  *   usageMode: "run" (no previousTotals), "delta" (usage = threadTotals - previousTotals),
- *   or "raw-fallback" (totals went down, so they were not cumulative; usage left as reported)
+ *   "raw-fallback" (totals went down, so they were not cumulative; usage left as reported),
+ *   "new-thread" (previousTotals belong to another thread; usage left as reported),
+ *   or "delta-unverified" (subtracted, but this output carried no thread id to confirm the
+ *   thread; `exec resume <id>` targets that thread, so the same thread is the likely case).
+ *   usageSource: "final-event", "summed-events" (no final event; legacy) or "none".
  */
 function parseCodexOutput(stdout, lastMessageContent, previousTotals) {
   var lines = (stdout || "").split(/\r?\n/).filter(function (l) { return l.trim().length > 0; });
-  var usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 };
+  var summedUsage = copyUsage({});
+  var finalUsage = null;
   var filesChanged = [];
   var status = "unknown";
   var sessionId = null;
@@ -50,15 +62,14 @@ function parseCodexOutput(stdout, lastMessageContent, previousTotals) {
     // where the inner item carries the real type (agent_message, error, etc.)
     var inner = (data.type === "item.completed" && data.item) ? data.item : null;
 
-    // Extract usage — accumulate from all events that carry usage info
+    // Extract usage: the last final event wins (its numbers are running totals);
+    // other usage-carrying events are summed as a legacy fallback.
     var extracted = extractUsage(data);
     if (extracted) {
-      usage.inputTokens += extracted.inputTokens;
-      usage.cachedInputTokens += extracted.cachedInputTokens;
-      usage.outputTokens += extracted.outputTokens;
-      usage.totalTokens += extracted.totalTokens;
-      if (extracted.estimatedCost) {
-        usage.estimatedCost += extracted.estimatedCost;
+      if (data.type === "turn.completed" || data.type === "task_complete") {
+        finalUsage = extracted;
+      } else {
+        addUsage(summedUsage, extracted);
       }
     }
 
@@ -118,15 +129,29 @@ function parseCodexOutput(stdout, lastMessageContent, previousTotals) {
     result = "(No response captured from Codex)";
   }
 
+  var hasSummed = summedUsage.inputTokens > 0 || summedUsage.outputTokens > 0;
+  var usageSource = finalUsage ? "final-event" : hasSummed ? "summed-events" : "none";
+  var usage = copyUsage(finalUsage || summedUsage);
   var threadTotals = copyUsage(usage);
+  threadTotals.threadId = sessionId;
+
   var usageMode = "run";
-  if (previousTotals) {
-    var delta = subtractUsage(threadTotals, previousTotals);
-    if (delta) {
-      usage = delta;
-      usageMode = "delta";
-    } else {
+  var otherThread = previousTotals && previousTotals.threadId && sessionId && previousTotals.threadId !== sessionId;
+  if (otherThread) {
+    usageMode = "new-thread";
+  } else if (previousTotals) {
+    var delta = subtractUsage(usage, previousTotals);
+    if (!delta) {
       usageMode = "raw-fallback";
+    } else {
+      usage = delta;
+      usageMode = previousTotals.threadId && !sessionId ? "delta-unverified" : "delta";
+      // A field the final event omitted is unknown, not zero: keep the last known running
+      // total so the next round's delta for that field is not inflated.
+      var missing = (finalUsage && finalUsage.missingFields) || [];
+      for (var m = 0; m < missing.length; m++) {
+        threadTotals[missing[m]] = Number(previousTotals[missing[m]]) || 0;
+      }
     }
   }
 
@@ -135,6 +160,7 @@ function parseCodexOutput(stdout, lastMessageContent, previousTotals) {
     usage: usage,
     threadTotals: threadTotals,
     usageMode: usageMode,
+    usageSource: usageSource,
     filesChanged: filesChanged,
     status: status,
     sessionId: sessionId
@@ -167,19 +193,27 @@ function extractUsage(data) {
   if (typeof inputTokens !== "number" || typeof outputTokens !== "number") return null;
 
   var totalTokens = candidate.total_tokens != null ? candidate.total_tokens : inputTokens + outputTokens;
-  var cachedInputTokens = typeof candidate.cached_input_tokens === "number" ? candidate.cached_input_tokens : 0;
+  var hasCached = typeof candidate.cached_input_tokens === "number";
+  var cachedInputTokens = hasCached ? candidate.cached_input_tokens : 0;
 
   // Extract cost: total_cost, cost_usd at usage level, or cost_usd at top level
   var cost = candidate.total_cost != null ? candidate.total_cost
     : candidate.cost_usd != null ? candidate.cost_usd
-    : data.cost_usd != null ? data.cost_usd : 0;
+    : data.cost_usd;
+  var hasCost = typeof cost === "number";
+
+  // Optional fields this event did not report (unknown, not zero; see parseCodexOutput).
+  var missingFields = [];
+  if (!hasCached) missingFields.push("cachedInputTokens");
+  if (!hasCost) missingFields.push("estimatedCost");
 
   return {
     inputTokens: inputTokens,
     cachedInputTokens: cachedInputTokens,
     outputTokens: outputTokens,
     totalTokens: totalTokens,
-    estimatedCost: typeof cost === "number" ? cost : 0
+    estimatedCost: hasCost ? cost : 0,
+    missingFields: missingFields
   };
 }
 
@@ -189,6 +223,10 @@ function copyUsage(u) {
   var out = {};
   for (var i = 0; i < USAGE_FIELDS.length; i++) out[USAGE_FIELDS[i]] = Number(u[USAGE_FIELDS[i]]) || 0;
   return out;
+}
+
+function addUsage(target, u) {
+  for (var i = 0; i < USAGE_FIELDS.length; i++) target[USAGE_FIELDS[i]] += Number(u[USAGE_FIELDS[i]]) || 0;
 }
 
 /**

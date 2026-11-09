@@ -54,10 +54,12 @@ Quota guard: warns at [quota.warnPercent, default 80]%, asks before a Codex call
 
 **Recorded history** (since [session startedAt])
 
-| | Dispatches | Input tokens | Output tokens |
-|-|-----------|-------------|--------------|
-| Session | [N] | [N] | [N] |
-| Lifetime | [N] | [N] | [N] |
+| | Dispatches | Input tokens | of which cached | Output tokens |
+|-|-----------|-------------|-----------------|--------------|
+| Session | [N] | [N] | [N] | [N] |
+| Lifetime | [N] | [N] | [N] | [N] |
+
+Cached input tokens are counted since [ledger `cachedTrackedSince`, local date]; older records only have the input total, so the cached column covers that period only.
 
 ---
 

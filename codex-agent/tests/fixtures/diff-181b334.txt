@@ -1,0 +1,134 @@
+commit 181b3346eedbb56a93f8ace5770738a45571605b
+Author: RJ <rj@localhost>
+Date:   Mon Nov 9 01:50:18 2026 +0100
+
+    fix(codex-agent): per-round usage on resume; tool budgets for discuss rounds
+    
+    - parse-output: `codex exec resume` reports THREAD-cumulative usage in
+      turn.completed (0.167.0: two identical resumed rounds reported 51,968
+      then 88,026 input tokens; each round's own share was ~35K), so the usage
+      ledger re-counted every earlier round. parseCodexOutput takes an optional
+      previousTotals and returns usage (this round), threadTotals (to pass to
+      the next resumed round) and usageMode (run | delta | raw-fallback). Also
+      reports cached_input_tokens. Old 2-argument calls behave as before.
+      Verified on saved 0.167 JSONL: resumed rounds now yield 34,828 / 36,058 /
+      356,634 input tokens.
+    - discuss: carry threadTotals between rounds and pass them when parsing
+      resumed rounds (6a, 10b); fresh threads (round 1, 6b, 10c) pass ''.
+    - discuss: "facts first" guidance, and prompt tool budgets of 8 calls in
+      round 1 and 3 in follow-up rounds (none for execution). Measured: an
+      open-ended round 1 took ~33 steps / 113,659 uncached tokens; a follow-up
+      asked for <=3 tools used 4 and added 2,586 uncached. Web tools stay on
+      until the lean-profile plugin set is decided: -c web_search="disabled"
+      alone does not stop browsing via plugin tools.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01KPDbM3HLm4iyDRG27o7uYy
+
+diff --git a/codex-agent/lib/parse-output.js b/codex-agent/lib/parse-output.js
+index 09864cc..6b2f204 100644
+--- a/codex-agent/lib/parse-output.js
++++ b/codex-agent/lib/parse-output.js
+@@ -14,13 +14,22 @@
+ /**
+  * Parse Codex JSONL stdout + optional last-message file content into a structured result.
+  *
++ * `codex exec resume` reports the THREAD's cumulative usage in turn.completed, not the
++ * resumed round's own share (verified on 0.167.0: two identical resumed rounds reported
++ * 51,968 then 88,026 input tokens; each round's own share was ~35K). When resuming,
++ * pass the previous round's `threadTotals` as `previousTotals` so `usage` covers this
++ * round only; feed this call's `threadTotals` into the next resumed round.
++ *
+  * @param {string} stdout - Raw JSONL output from `codex exec --json`
+  * @param {string|null} lastMessageContent - Content of --output-last-message file, or null
+- * @returns {{ result: string, usage: object, filesChanged: string[], status: string, sessionId: string|null }}
++ * @param {object|null} [previousTotals] - `threadTotals` from the previous round of the same thread (resume only)
++ * @returns {{ result: string, usage: object, threadTotals: object, usageMode: string, filesChanged: string[], status: string, sessionId: string|null }}
++ *   usageMode: "run" (no previousTotals), "delta" (usage = threadTotals - previousTotals),
++ *   or "raw-fallback" (totals went down, so they were not cumulative; usage left as reported)
+  */
+-function parseCodexOutput(stdout, lastMessageContent) {
++function parseCodexOutput(stdout, lastMessageContent, previousTotals) {
+   var lines = (stdout || "").split(/\r?\n/).filter(function (l) { return l.trim().length > 0; });
+-  var usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 };
++  var usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 };
+   var filesChanged = [];
+   var status = "unknown";
+   var sessionId = null;
+@@ -45,6 +54,7 @@ function parseCodexOutput(stdout, lastMessageContent) {
+     var extracted = extractUsage(data);
+     if (extracted) {
+       usage.inputTokens += extracted.inputTokens;
++      usage.cachedInputTokens += extracted.cachedInputTokens;
+       usage.outputTokens += extracted.outputTokens;
+       usage.totalTokens += extracted.totalTokens;
+       if (extracted.estimatedCost) {
+@@ -108,9 +118,23 @@ function parseCodexOutput(stdout, lastMessageContent) {
+     result = "(No response captured from Codex)";
+   }
+ 
++  var threadTotals = copyUsage(usage);
++  var usageMode = "run";
++  if (previousTotals) {
++    var delta = subtractUsage(threadTotals, previousTotals);
++    if (delta) {
++      usage = delta;
++      usageMode = "delta";
++    } else {
++      usageMode = "raw-fallback";
++    }
++  }
++
+   return {
+     result: result,
+     usage: usage,
++    threadTotals: threadTotals,
++    usageMode: usageMode,
+     filesChanged: filesChanged,
+     status: status,
+     sessionId: sessionId
+@@ -143,6 +167,7 @@ function extractUsage(data) {
+   if (typeof inputTokens !== "number" || typeof outputTokens !== "number") return null;
+ 
+   var totalTokens = candidate.total_tokens != null ? candidate.total_tokens : inputTokens + outputTokens;
++  var cachedInputTokens = typeof candidate.cached_input_tokens === "number" ? candidate.cached_input_tokens : 0;
+ 
+   // Extract cost: total_cost, cost_usd at usage level, or cost_usd at top level
+   var cost = candidate.total_cost != null ? candidate.total_cost
+@@ -151,12 +176,36 @@ function extractUsage(data) {
+ 
+   return {
+     inputTokens: inputTokens,
++    cachedInputTokens: cachedInputTokens,
+     outputTokens: outputTokens,
+     totalTokens: totalTokens,
+     estimatedCost: typeof cost === "number" ? cost : 0
+   };
+ }
+ 
++var USAGE_FIELDS = ["inputTokens", "cachedInputTokens", "outputTokens", "totalTokens", "estimatedCost"];
++
++function copyUsage(u) {
++  var out = {};
++  for (var i = 0; i < USAGE_FIELDS.length; i++) out[USAGE_FIELDS[i]] = Number(u[USAGE_FIELDS[i]]) || 0;
++  return out;
++}
++
++/**
++ * current - previous, field by field. Returns null if input or output tokens would go
++ * negative, which means the reported numbers were not cumulative after all.
++ */
++function subtractUsage(current, previous) {
++  var prev = copyUsage(previous || {});
++  var out = {};
++  for (var i = 0; i < USAGE_FIELDS.length; i++) {
++    var f = USAGE_FIELDS[i];
++    out[f] = current[f] - prev[f];
++  }
++  if (out.inputTokens < 0 || out.outputTokens < 0) return null;
++  return out;
++}
++
+ /**
+  * Extract a changed file path from a tool-use event.
+  */

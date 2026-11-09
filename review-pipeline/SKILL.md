@@ -1,6 +1,6 @@
 ---
 name: review-pipeline
-version: 0.3.0
+version: 0.3.1
 description: >
   This skill should be used when the user asks to "review my code", "run a code review",
   "review this PR", "check my diff", "analyze these changes", "do a security review",
@@ -314,7 +314,7 @@ Note: Stage 3A and 3B are treated as a single atomic unit for resume purposes. `
 
 9. **Skeptic** -- `subagent_type: "Skeptic"` -- Prompt: "You are performing a dual-mandate meta-review. You are NOT reviewing code -- you are reviewing the FINDINGS from a code review pipeline. Here are all findings so far: [list all findings with tags, severities, files, descriptions]. Your two tasks: (1) What P0/P1 failure mode is NOT covered by any finding in this list? Think pre-mortem: this code ships, 30 days later it fails -- why? (2) Which existing findings are false positives that should be dismissed? Also check: were any [AUTO-FIX] items misclassified (should they have been [CONFIRM])? Produce at most 5 additional findings or an explicit clear-all."
 
-If Skeptic produces new P0/P1 findings: run one targeted Codex pass via the **Skill tool**: `skill: "codex-agent:dispatch"` on the specific files and findings the Skeptic flagged. Do NOT use the Agent tool for this -- Codex is a different model architecture (see Invariant 8).
+If Skeptic produces new P0/P1 findings: run one targeted Codex pass via the **Skill tool**: `skill: "codex-agent:dispatch"` with args: "Focused code review of <the files the Skeptic flagged> to verify these findings: <the new P0/P1 findings>. [include the relevant diff hunks]. Report findings with severity, file, line, description, and suggested fix." The words "Focused code review" and the pasted hunks make the wrapper treat this as a scoped, read-only review of exactly those files, not a writable task. Do NOT use the Agent tool for this -- Codex is a different model architecture (see Invariant 8).
 
 **Skeptic dismissals:** For each finding the Skeptic recommends dismissing as a false positive, set `status: "dismissed"`, `dismissed_at: <current ISO UTC timestamp>`, and `dismissed_reason: "<Skeptic's stated reason>"` in the findings array.
 

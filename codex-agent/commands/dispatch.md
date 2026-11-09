@@ -69,23 +69,41 @@ Codex loads every enabled plugin, MCP server and connector into each model step.
 
 Use `--full` when the task needs web search, the OpenAI docs, browser/desktop automation, ChatGPT connectors, or document/slide/visualization skills. On `codex exec review` the profile is accepted and runs correctly, but its effect can't be measured there (review mode reports 0 tokens).
 
-## Step 3: Budget Check
+## Step 2c: Write the Task File
 
-Run this budget check (use forward slashes in the path, no backticks in the string):
+**Never put the task text on a shell command line.** Write it to a file and pass that file to every later step:
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = ut.checkBudget(ledger, config, 'codex'); console.log(JSON.stringify(result));"
+node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); console.log(path.join(dir, 'task-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.txt'));"
 ```
 
-- If `allowed` is `false`: Report the budget reason to the user and stop. Suggest running `/codex-agent:usage` to check spend or editing config to raise limits.
-- If `sessionPercent` or `lifetimePercent` is > 80: Warn the user that budget is running high but proceed.
+Write the task text to that path (`<TASK_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!` (seen 2026-11-09 with a pasted JavaScript diff, where `!==` appeared as `\!==`).
+
+Why: these steps used to pass `"$ARGUMENTS"` inside double quotes on the command line. A pasted diff containing `"`, a backtick or `$(...)` would break the command or run part of it as a shell command, and the `\!` escaping would corrupt code sent to Codex. Every step below reads `<TASK_FILE>`, and Codex gets its prompt on stdin (`-`).
+
+## Step 3: Plan-Usage Guard
+
+Check the Codex plan quota (the 5-hour, weekly and monthly percentages that Codex's `/status` shows) before starting:
+
+```bash
+node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" guard
+```
+
+It uses the newest session-record snapshot when it is at most 30 minutes old (free, ~0.1 s), otherwise a live `account/rateLimits/read` query (~1.5-2 s, no tokens). Thresholds: `quota.warnPercent` (default 80) and `quota.askPercent` (default 95) in config.json. Act on `level`:
+
+- `"ok"`: proceed silently.
+- `"warn"`: tell the user in one line, e.g. "Codex plan usage high: week 84% used (>= 80%)", and proceed.
+- `"ask"`: use AskUserQuestion: "Codex plan usage is high: [reasons]. The window resets [resetsAt, local time]. Proceed anyway?" with options **Proceed** and **Cancel**. Stop unless the user chooses Proceed. (A caller such as review-pipeline will see this question too.)
+- `"unknown"`: note "Codex plan usage unavailable ([reasons])" and proceed.
+
+The old token-budget check was removed on 2026-11-09: its limits were set to 5 billion tokens / $10,000 and never triggered. The usage ledger still records tokens (Step 9) as history.
 
 ## Step 3b: Cache Check
 
 If the config has `cache.enabled` set to `true`, check the cache before routing:
 
 ```bash
-node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var cacheDir = 'C:/Users/RJ/.claude/codex-agent/cache'; var key = c.computeKey(process.argv[1] + ' [codex-profile:' + process.argv[3] + ']', process.argv[2]); var result = c.lookup(cacheDir, key, config.cache ? config.cache.ttlMs : 3600000); result.key = key; console.log(JSON.stringify(result));" "$ARGUMENTS" "<current-working-directory>" "<PROFILE>"
+node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var cacheDir = 'C:/Users/RJ/.claude/codex-agent/cache'; var key = c.computeKey(fs.readFileSync(process.argv[1], 'utf-8') + ' [codex-profile:' + process.argv[3] + ']', process.argv[2]); var result = c.lookup(cacheDir, key, config.cache ? config.cache.ttlMs : 3600000); result.key = key; console.log(JSON.stringify(result));" "<TASK_FILE>" "<current-working-directory>" "<PROFILE>"
 ```
 
 If `hit` is `true`:
@@ -102,7 +120,7 @@ If `hit` is `false`, save the `key` value for use in Step 9 (to store the result
 Run the router to evaluate whether this task is best suited for Codex or Claude subagent:
 
 ```bash
-node -e "var r = require('C:/Users/RJ/.claude/codex-agent/lib/router.js'); var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = r.routeTask(process.argv[1], ledger, config); console.log(JSON.stringify(result));" "$ARGUMENTS"
+node -e "var r = require('C:/Users/RJ/.claude/codex-agent/lib/router.js'); var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = r.routeTask(fs.readFileSync(process.argv[1], 'utf-8'), ledger, config); console.log(JSON.stringify(result));" "<TASK_FILE>"
 ```
 
 Parse the JSON result and act based on the `agent` field:
@@ -124,7 +142,7 @@ Parse the JSON result and act based on the `agent` field:
 Run review detection to determine if this task is a code review request:
 
 ```bash
-node -e "var r = require('C:/Users/RJ/.claude/codex-agent/lib/router.js'); var result = r.detectReviewTask(process.argv[1]); console.log(JSON.stringify(result));" "$ARGUMENTS"
+node -e "var r = require('C:/Users/RJ/.claude/codex-agent/lib/router.js'); var result = r.detectReviewTask(require('fs').readFileSync(process.argv[1], 'utf-8')); console.log(JSON.stringify(result));" "<TASK_FILE>"
 ```
 
 Parse the JSON result to get `isReview`, `isFocused`, `confidence`, and `signals`.
@@ -140,6 +158,7 @@ Parse the JSON result to get `isReview`, `isFocused`, `confidence`, and `signals
 
 **If `isReview` is `true` and `isFocused` is `true`**:
 - This is a **focused review** — will use standard exec with a review prompt template in Step 6c.
+- `hasScope: true` means the request carries or names its own scope (a pasted diff, a commit, a PR, file paths, or "focused review"). Such a review must cover exactly that scope; it is never replaced by the working tree's `git diff HEAD`. (review-pipeline's Stage 3 pastes its diff, so it lands here.)
 - Note briefly: "Focused review detected — [signals]. Using standard exec with review prompt."
 - Set `IS_REVIEW=true`, `IS_FOCUSED=true`.
 
@@ -160,7 +179,7 @@ Save the two paths from the output for use in subsequent steps.
 Also create a session object for logging:
 
 ```bash
-node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = sl.createSession('dispatch', process.argv[1]); console.log(JSON.stringify(session));" "$ARGUMENTS"
+node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = sl.createSession('dispatch', require('fs').readFileSync(process.argv[1], 'utf-8')); console.log(JSON.stringify(session));" "<TASK_FILE>"
 ```
 
 Save the session object (particularly the `id`) for use in Steps 9 and 10. You will populate it with routing info, usage, and result data later.
@@ -179,12 +198,12 @@ This is the default path — unchanged from before.
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "$ARGUMENTS"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
 ```
 
 ### Step 6b: Pure Diff Review (`IS_REVIEW` is true, `IS_FOCUSED` is false)
@@ -198,7 +217,7 @@ You are performing a code review of <SCOPE>. Collect the changes yourself with r
 - `review.defaultMode` `"uncommitted"` (default): `<SCOPE>` = `the uncommitted changes in this repository (staged, unstaged and untracked files)`; `<SCOPE_COMMANDS>` = `git status --short, git diff HEAD, and reading any untracked files that git status lists`.
 - `review.defaultMode` `"base"`: `<SCOPE>` = `the changes on this branch relative to <review.baseBranch>`; `<SCOPE_COMMANDS>` = `git diff <review.baseBranch>...HEAD`.
 
-Then skip the rest of this step and continue with the Step 6c `--output-schema` command, **but with `--sandbox read-only` in place of `--sandbox workspace-write`**: a diff review must not modify files, and the sandbox should enforce that rather than the prompt. Then Step 6e.
+Then skip the rest of this step and continue with the Step 6c `--output-schema` command (read-only, like every review path), then Step 6e. This pure-diff prompt is only for requests with **no** scope of their own (bare "review my changes"); requests that carry a diff, commit, PR or files are routed to Step 6c by Step 4b (`hasScope`).
 
 **If `config.review.useOutputSchema` is `false`** (or not set), use `codex exec review` with minimal safe flags. Note: `codex exec review` does **NOT** support `-C`; it accepts `--output-schema` but ignores it (see above), and it **DOES** support `-o, --output-last-message <FILE>`. Codex reviews the repo at the process's current working directory (which is already the project dir). Pass **no** prompt: the user's `$ARGUMENTS` are not passed, and a prompt is rejected together with the review-target flags below. `parseReviewOutput()` handles the non-JSON review text gracefully.
 
@@ -206,37 +225,43 @@ Then skip the rest of this step and continue with the Step 6c `--output-schema` 
 
 **If `review.defaultMode` is `"uncommitted"` (default)**:
 ```bash
-codex <PROFILE_FLAG> exec review --json --output-last-message "<lastMsg-temp-path>" --uncommitted
+codex <PROFILE_FLAG> exec review --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" --uncommitted
 ```
 
 **If `review.defaultMode` is `"base"`**:
 ```bash
-codex <PROFILE_FLAG> exec review --json --output-last-message "<lastMsg-temp-path>" --base "<review.baseBranch>"
+codex <PROFILE_FLAG> exec review --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" --base "<review.baseBranch>"
 ```
+
+`-c 'sandbox_mode="read-only"'` is required: `exec review` has no `-s/--sandbox` flag and would otherwise inherit `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). A review must not modify files.
 
 Include `-m "<codexModel>"` if `codexModel` from config is not null.
 
-**Fallback**: If `codex exec review` fails with an "unknown command", "unknown flag", or similar error indicating the review subcommand is not supported, **fall through to Step 6c** (focused review fallback) using the original `$ARGUMENTS` as the prompt.
+**Fallback**: If `codex exec review` fails with an "unknown command", "unknown flag", or similar error indicating the review subcommand is not supported, **fall through to Step 6c** (focused review fallback) with the task text from `<TASK_FILE>` as the focus.
 
 ### Step 6c: Focused Review (`IS_REVIEW` is true, `IS_FOCUSED` is true — or from 6b)
 
 Use standard `codex exec` with a review prompt template. When arriving from Step 6b because `useOutputSchema` is true, use the pure-diff review prompt defined there and the `--output-schema` command below. Otherwise construct the prompt by wrapping `$ARGUMENTS` in a review-focused template:
 
 ```
-You are performing a focused code review. Focus: <$ARGUMENTS>. Instructions: - Prioritize reviewing diff/changed files if available. - Report only issues relevant to the requested focus. - For each issue provide: severity (low/medium/high/critical), category, file path, line numbers, description, evidence, and suggested fix. - If no issues are found, state that explicitly. - Output your findings as JSON with keys: summary (string), overall_severity (none/low/medium/high/critical), findings (array of objects), stats (object with files_reviewed count, findings_count, and diff_scope string).
+You are performing a focused code review. Focus: <$ARGUMENTS>. Instructions: - Review exactly the scope given in the focus above: a pasted diff, or the named commit, PR, branch or files. Do not substitute the working tree's uncommitted changes. - If a named commit, PR, branch or file cannot be found, say so in limitations and do not review other changes instead. - Without a named scope, prioritize reviewing diff/changed files if available. - Report only issues relevant to the requested focus. - For each issue provide: severity (low/medium/high/critical), category, file path, line numbers, description, evidence, and suggested fix. - If no issues are found, state that explicitly. - Output your findings as JSON with keys: summary (string), overall_severity (none/low/medium/high/critical), findings (array of objects), stats (object with files_reviewed count, findings_count, and diff_scope string).
 ```
+
+Write the complete prompt to a new file `<PROMPT_FILE>` in the same temp folder with the **Write** tool: the template above with the task text from `<TASK_FILE>` in place of `<$ARGUMENTS>` (or, when arriving from Step 6b, the pure-diff prompt with the task text as the requester's note). It reaches Codex on stdin, never on the command line.
 
 Then run:
 
 **If `config.review.useOutputSchema` is `true`**, include `--output-schema` to enforce structured JSON output via the API:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **If `config.review.useOutputSchema` is `false`** (or not set), omit `--output-schema`:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<review-prompt>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
+
+**Sandbox**: every review path runs `read-only` (both commands above, the rerouted pure-diff review, and `-c 'sandbox_mode="read-only"'` on `exec review`), so the sandbox, not the prompt, keeps reviews from modifying files. Tasks that must write (e.g. fix-and-verify's adversarial tester, which writes tests) are not reviews and go through Step 6a with `workspace-write`.
 
 Include `-m "<codexModel>"` if `codexModel` from config is not null.
 
@@ -329,10 +354,10 @@ Replace `<INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with the actual values
 If the config has `dashboard.enabled` set to `true` and `dashboard.conversationsDir` is set (not null):
 
 ```bash
-node -e "var db = require('C:/Users/RJ/.claude/codex-agent/lib/dashboard-bridge.js'); var convId = db.getConversationId(); db.ensureConversation(process.argv[1], convId); db.writeDispatchMessages(process.argv[1], convId, { task: process.argv[2], result: process.argv[3], usage: JSON.parse(process.argv[4]) }); console.log('dashboard: written to ' + convId);" "<conversationsDir>" "$ARGUMENTS" "<result-text>" "<usage-json>"
+node -e "var db = require('C:/Users/RJ/.claude/codex-agent/lib/dashboard-bridge.js'); var convId = db.getConversationId(); db.ensureConversation(process.argv[1], convId); var fs = require('fs'); db.writeDispatchMessages(process.argv[1], convId, { task: fs.readFileSync(process.argv[2], 'utf-8'), result: fs.readFileSync(process.argv[3], 'utf-8'), usage: JSON.parse(process.argv[4]) }); console.log('dashboard: written to ' + convId);" "<conversationsDir>" "<TASK_FILE>" "<RESULT_FILE>" "<usage-json>"
 ```
 
-Replace `<conversationsDir>` with the value from config, `<result-text>` with the Codex response, and `<usage-json>` with a JSON string of `{ inputTokens, outputTokens, estimatedCost }`.
+Replace `<conversationsDir>` with the value from config, `<RESULT_FILE>` with a file holding the Codex response (the `lastMsg` file from Step 5, or one you write with the Write tool when it is empty), and `<usage-json>` with a JSON string of `{ inputTokens, outputTokens, estimatedCost }` (numbers only, so it is safe on the command line).
 
 If this step fails, log the error but do not stop — dashboard integration is optional.
 
@@ -341,12 +366,12 @@ If this step fails, log the error but do not stop — dashboard integration is o
 If the config has `routing.historyEnabled` set to `true` (or not explicitly `false`):
 
 ```bash
-node -e "var rh = require('C:/Users/RJ/.claude/codex-agent/lib/routing-history.js'); rh.recordOutcome('C:/Users/RJ/.claude/codex-agent/routing-history.json', JSON.parse(process.argv[1])); console.log('history: recorded');" "<outcome-json>"
+node -e "var rh = require('C:/Users/RJ/.claude/codex-agent/lib/routing-history.js'); var o = JSON.parse(process.argv[1]); o.taskDescription = require('fs').readFileSync(process.argv[2], 'utf-8').slice(0, 200); rh.recordOutcome('C:/Users/RJ/.claude/codex-agent/routing-history.json', o); console.log('history: recorded');" "<outcome-json>" "<TASK_FILE>"
 ```
 
 Where `<outcome-json>` is a JSON string containing:
 - `timestamp`: current ISO timestamp
-- `taskDescription`: the original `$ARGUMENTS` (truncated to 200 chars)
+- (no `taskDescription` here: the command reads the first 200 characters from `<TASK_FILE>`)
 - `complexityScore`: from Step 4 routing result (or 0 if not available)
 - `agent`: "codex"
 - `routedTo`: the agent from Step 4 routing result
@@ -362,14 +387,13 @@ If this step fails, log the error but do not stop — history recording is optio
 If the config has `cache.enabled` set to `true` and the dispatch was successful (status is "completed"), store the result in cache using the key from Step 3b:
 
 ```bash
-node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var maxEntries = config.cache ? config.cache.maxEntries : 100; c.store('C:/Users/RJ/.claude/codex-agent/cache', process.argv[1], JSON.parse(process.argv[2]), maxEntries); console.log('cache: stored');" "<cache-key>" "<entry-json>"
+node -e "var c = require('C:/Users/RJ/.claude/codex-agent/lib/cache.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var maxEntries = config.cache ? config.cache.maxEntries : 100; var e = JSON.parse(process.argv[2]); e.taskDescription = fs.readFileSync(process.argv[3], 'utf-8'); e.result = fs.readFileSync(process.argv[4], 'utf-8'); c.store('C:/Users/RJ/.claude/codex-agent/cache', process.argv[1], e, maxEntries); console.log('cache: stored');" "<cache-key>" "<entry-json>" "<TASK_FILE>" "<RESULT_FILE>"
 ```
 
 Where `<entry-json>` is a JSON string with the cache entry shape:
 - `key`: the cache key from Step 3b
-- `taskDescription`: the original `$ARGUMENTS`
+- (no `taskDescription` and no `result` here: the command reads them from `<TASK_FILE>` and `<RESULT_FILE>`, see Step 9b, so no free text goes on the command line)
 - `workingDir`: the current working directory
-- `result`: the Codex response text
 - `usage`: `{ inputTokens, outputTokens, estimatedCost }` from Step 8
 - `filesChanged`: array of files changed from Step 8
 - `status`: "completed"
@@ -395,7 +419,9 @@ node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js
 Where `<SESSION_JSON>` is the complete session object serialized as a JSON string. Build this from the session created in Step 5, populated with:
 - `session.model` = the RESOLVED_MODEL from Step 6e (the actual model, not null)
 - `session.routing` = `{ agent, confidence, reason }` from Step 4
-- `session.rounds` = one entry with `{ prompt: "$ARGUMENTS", response: "<result text truncated to 2000>", usage: <usage from Step 8>, timestamp: "<ISO>" }`
+- `session.rounds` = one entry with `{ prompt: <the task text from TASK_FILE>, response: "<result text truncated to 2000>", usage: <usage from Step 8>, timestamp: "<ISO>" }`
+
+The session JSON contains the task and Codex's response, so always use the temp-file variant below (write the JSON with the Write tool), never the inline `process.argv[1]` form.
 - `session.result` = `{ status: "<status>", filesChanged: [<files>], usage: <usage> }`
 - `session.error` = `null` (or `{ code: "<ERROR_CODE>", message: "<error text>" }` if an error occurred)
 - `session.sessionId` = the Codex session ID from Step 8 parse result (may be null)
@@ -431,7 +457,7 @@ Present the results to the user. **Use a review-specific format if `IS_REVIEW` i
 - Total: [N] tokens
 - Estimated Cost: $[X.XX]
 
-**Budget**: Session [X]% | Lifetime [X]%
+**Codex plan**: [the `line` printed by `node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" line <Codex session ID from Step 8>`, e.g. "5h 12% (resets 06:37) · week 23% (resets Wed 11 Nov 09:40)"; free, read from this call's own session record]
 
 **Session ID**: [Codex session ID from Step 8, or session log ID from Step 5 if Codex session ID is null]
 
@@ -472,7 +498,7 @@ node -e "var p = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js');
 **Token Usage**: Input: [N] | Output: [N] | Total: [N] | Cost: $[X.XX]
 Note: `codex exec review` may report 0 tokens (upstream bug) — the review result is still valid.
 
-**Budget**: Session [X]% | Lifetime [X]%
+**Codex plan**: [the `line` printed by `node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" line <Codex session ID from Step 8>`, e.g. "5h 12% (resets 06:37) · week 23% (resets Wed 11 Nov 09:40)"; free, read from this call's own session record]
 
 ---
 

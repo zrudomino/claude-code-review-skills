@@ -387,13 +387,77 @@ var FOCUS_CONSTRAINT_PATTERNS = [
 ];
 
 /**
+ * Patterns showing that the request carries or names its own review scope.
+ * Such a review must cover exactly that scope (Step 6c with the caller's text)
+ * and must never be replaced by the working tree's `git diff HEAD` (the pure-diff
+ * path). Found 2026-11-09: review-pipeline pastes its diff into the request, and
+ * whether it was treated as focused depended on its file paths happening to
+ * contain "lib/" or "security".
+ */
+var REVIEW_SCOPE_PATTERNS = [
+  // A pasted unified diff
+  /^diff --git /m,
+  /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m,
+  /^(?:---|\+\+\+) [ab]\//m,
+  // A named commit, commit range or pull request
+  /\bcommit\s+[0-9a-f]{7,40}\b/i,
+  /\b[0-9a-f]{7,40}\.\.\.?[0-9a-f]{7,40}\b/i,
+  /\b(?:PR|pull request)\s*#?\d+\b/i,
+  // A named file: a path with at least one separator and an extension
+  /(?:^|[\s`'"(])[\w.-]+(?:[\/\\][\w.-]+)+\.[A-Za-z0-9]{1,6}\b/,
+  // An explicitly focused review
+  /\bfocused\s+(?:code\s+)?review\b/i
+];
+
+/**
  * Anti-patterns — phrases where "review" does NOT mean a code/diff review.
  * These prevent false positives from task descriptions like "implement a review system".
  */
 var REVIEW_ANTI_PATTERNS = [
   /\b(implement|build|create|design|write|develop)\s+(?:a\s+|the\s+)?review\s+(system|feature|page|form|component|workflow|process|mechanism|tool|platform)\b/i,
-  /\breview\s+(system|feature|page|form|component|workflow|process|mechanism)\b/i
+  /\breview\s+(system|feature|page|form|component|workflow|process|mechanism)\b/i,
+  // Test-writing tasks (fix-and-verify's adversarial tester) need workspace-write;
+  // routing them as a review would make them read-only.
+  /\b(?:write|add|create)\s+(?:\w+\s+){0,3}tests?\b/i,
+  /\badversarial\s+tester\b/i
 ];
+
+/**
+ * Lines that belong to pasted git output: unified-diff lines and `git show` headers.
+ */
+var PASTED_GIT_LINE = /^(?:diff --git |index |@@ |--- |\+\+\+ |[+\- \\]|new file mode|deleted file mode|old mode|new mode|similarity index|rename (?:from|to) |Binary files |(?:Author|AuthorDate|Commit|CommitDate|Date|Merge):)/;
+var PASTED_GIT_START = /^(?:diff --git |--- [ab]\/|commit [0-9a-f]{7,40}\b)/;
+
+/**
+ * The caller's instruction without pasted code. Review intent, anti-patterns and
+ * focus are judged on this, because words inside a pasted diff or file ("code
+ * review", "security", ...) say nothing about what the caller wants: on
+ * 2026-11-09 a test-writing request carrying a diff that mentioned "code review"
+ * was routed as a (read-only) review. Removes fenced ``` blocks and git output
+ * blocks (from a `diff --git`, `--- a/` or `commit <sha>` line through the
+ * following diff/header/blank/indented lines).
+ */
+/** First pattern that matches `text`, or null. (Patterns have no /g flag, so .test is stateless.) */
+function firstMatch(patterns, text) {
+  for (var i = 0; i < patterns.length; i++) {
+    if (patterns[i].test(text)) return patterns[i];
+  }
+  return null;
+}
+
+function stripPastedCode(text) {
+  var lines = text.replace(/```[\s\S]*?```/g, " ").split(/\r?\n/);
+  var kept = [];
+  var inPasted = false;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (PASTED_GIT_START.test(line)) inPasted = true;
+    if (inPasted && (line === "" || PASTED_GIT_LINE.test(line))) continue;
+    inPasted = false;
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
 
 /**
  * Detect whether a task description is requesting a code review.
@@ -402,37 +466,39 @@ var REVIEW_ANTI_PATTERNS = [
  *   isReview: true  + isFocused: false → pure diff review (codex exec review)
  *   isReview: true  + isFocused: true  → focused review (standard exec with review prompt)
  *   isReview: false                    → normal dispatch
+ *   hasScope: true → the request carries/names its own scope (always makes isFocused true)
  *
  * @param {string} description - The task description
- * @returns {{ isReview: boolean, isFocused: boolean, confidence: string, signals: string[] }}
+ * @returns {{ isReview: boolean, isFocused: boolean, hasScope: boolean, confidence: string, signals: string[] }}
  */
 function detectReviewTask(description) {
   if (!description || typeof description !== "string") {
     return { isReview: false, isFocused: false, confidence: "high", signals: ["empty description"] };
   }
 
-  var text = description.toLowerCase();
+  // Intent, anti-patterns and focus come from the caller's own words; scope (Signal 3)
+  // is taken from the full text, pasted diff included.
+  var instruction = stripPastedCode(description);
   var signals = [];
 
   // Check anti-patterns first — if matched, this is NOT a review task
-  for (var a = 0; a < REVIEW_ANTI_PATTERNS.length; a++) {
-    if (REVIEW_ANTI_PATTERNS[a].test(description)) {
-      signals.push("anti-pattern: " + REVIEW_ANTI_PATTERNS[a].source.substring(0, 40));
-      return { isReview: false, isFocused: false, confidence: "high", signals: signals };
-    }
+  var anti = firstMatch(REVIEW_ANTI_PATTERNS, instruction);
+  if (anti) {
+    signals.push("anti-pattern: " + anti.source.substring(0, 40));
+    return { isReview: false, isFocused: false, confidence: "high", signals: signals };
   }
 
   // Signal 1: Review intent — check multi-word phrases first, then single word
   var hasReviewIntent = false;
   for (var i = 0; i < REVIEW_INTENT_KEYWORDS.length; i++) {
     var kwPattern = new RegExp("\\b" + REVIEW_INTENT_KEYWORDS[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
-    if (kwPattern.test(description)) {
+    if (kwPattern.test(instruction)) {
       hasReviewIntent = true;
       signals.push("intent: " + REVIEW_INTENT_KEYWORDS[i]);
       break;
     }
   }
-  if (!hasReviewIntent && REVIEW_WORD_PATTERN.test(description)) {
+  if (!hasReviewIntent && REVIEW_WORD_PATTERN.test(instruction)) {
     hasReviewIntent = true;
     signals.push("intent: review (single word)");
   }
@@ -442,14 +508,16 @@ function detectReviewTask(description) {
   }
 
   // Signal 2: Focus constraints — check if the review is scoped/focused
-  var isFocused = false;
-  for (var f = 0; f < FOCUS_CONSTRAINT_PATTERNS.length; f++) {
-    if (FOCUS_CONSTRAINT_PATTERNS[f].test(description)) {
-      isFocused = true;
-      signals.push("focus: " + FOCUS_CONSTRAINT_PATTERNS[f].source.substring(0, 40));
-      break;
-    }
-  }
+  var focus = firstMatch(FOCUS_CONSTRAINT_PATTERNS, instruction);
+  if (focus) signals.push("focus: " + focus.source.substring(0, 40));
+
+  // Signal 3: Caller-supplied scope — a review of a pasted diff, commit, PR or named
+  // files must review exactly that, so it is always routed as focused.
+  var scope = firstMatch(REVIEW_SCOPE_PATTERNS, description);
+  if (scope) signals.push("scope: " + scope.source.substring(0, 40));
+
+  var hasScope = scope !== null;
+  var isFocused = focus !== null || hasScope;
 
   // Determine confidence
   var confidence = "high";
@@ -460,6 +528,7 @@ function detectReviewTask(description) {
   return {
     isReview: true,
     isFocused: isFocused,
+    hasScope: hasScope,
     confidence: confidence,
     signals: signals
   };

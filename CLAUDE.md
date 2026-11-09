@@ -38,10 +38,10 @@ fix-and-verify carries a self-contained convenience copy of the Gate 8 procedure
 
 ## Three-Skill Integration
 - **local-security-scan** v0.8.0 — wrapper around Semgrep + Gitleaks + OSV-Scanner. Invoked by both other skills. Supports `SEMGREP_SKIP` / `GITLEAKS_SKIP` / `OSV_SKIP` env vars with RESULT-line transparency per Invariant 8.
-- **review-pipeline** v0.3.0 — runs local-security-scan at Step 5A (between Pre-Stage and Stage 0) to seed the finding corpus. Normalizes scan JSON into the canonical finding schema via the table in `references/security-corpus.md`. May escalate Stage 0 tier on P0 secrets / CVEs via `sec_escalate_tier`.
+- **review-pipeline** v0.3.1 — runs local-security-scan at Step 5A (between Pre-Stage and Stage 0) to seed the finding corpus. Normalizes scan JSON into the canonical finding schema via the table in `references/security-corpus.md`. May escalate Stage 0 tier on P0 secrets / CVEs via `sec_escalate_tier`.
 - **fix-and-verify** v0.3.0 — captures `sec_baseline` at Step 0, runs Gate 8 at Step 4.5 (between Codex Adversarial and Commit) to detect *new* findings relative to baseline. Hard-escalates on `scan_incomplete` or `matching_epoch` drift.
 
 ## Version
-- review-pipeline: v0.3.0 (schema_version: 2)
+- review-pipeline: v0.3.1 (schema_version: 2; v0.3.1 2026-11-09: the Skeptic follow-up is sent as a scoped "Focused code review", so codex-agent runs it read-only)
 - fix-and-verify: v0.3.0 (schema_version: 2)
 - local-security-scan: v0.8.0

@@ -77,7 +77,7 @@ Use `--full` when the task needs web search, the OpenAI docs, browser/desktop au
 node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); console.log(path.join(dir, 'task-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.txt'));"
 ```
 
-Write the task text to that path (`<TASK_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!` (seen 2026-11-09 with a pasted JavaScript diff, where `!==` appeared as `\!==`).
+Write the task text to that path (`<TASK_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!` (seen 2026-11-09 with a pasted JavaScript diff, where `!==` appeared as `\!==`). The original text is the `args` of your Skill call. If you only have that escaped copy (for example the command was typed by the user and their raw text is not in the conversation), undo the escaping by replacing every `\!` with `!`, and tell the user you did; this changes only a literal `\!` in the original, which is rare.
 
 Why: these steps used to pass `"$ARGUMENTS"` inside double quotes on the command line. A pasted diff containing `"`, a backtick or `$(...)` would break the command or run part of it as a shell command, and the `\!` escaping would corrupt code sent to Codex. Every step below reads `<TASK_FILE>`, and Codex gets its prompt on stdin (`-`).
 
@@ -96,7 +96,7 @@ It uses the newest session-record snapshot when it is at most 30 minutes old (fr
 - `"ask"`: use AskUserQuestion: "Codex plan usage is high: [reasons]. The window resets [resetsAt, local time]. Proceed anyway?" with options **Proceed** and **Cancel**. Stop unless the user chooses Proceed. (A caller such as review-pipeline will see this question too.)
 - `"unknown"`: note "Codex plan usage unavailable ([reasons])" and proceed.
 
-The old token-budget check was removed on 2026-11-09: its limits were set to 5 billion tokens / $10,000 and never triggered. The usage ledger still records tokens (Step 9) as history.
+The old token-budget check was removed on 2026-11-09: its limits were set to 5 billion tokens / 10,000 USD and never triggered. The usage ledger still records tokens (Step 9) as history.
 
 ## Step 3b: Cache Check
 

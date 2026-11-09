@@ -52,7 +52,19 @@ Extract these values:
 
 ## Step 2b: Select Codex Profile
 
-Same rule as `/codex-agent:dispatch` Step 2b: if `$ARGUMENTS` starts with `--full`, set `PROFILE="full"` and use the task text without that prefix from here on; otherwise `PROFILE` = `defaults.codexProfile`. If `PROFILE` is `"lean"` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, warn the user and use `"full"`. Both tasks get the same `profile`, so the comparison is between models only.
+Same rule as `/codex-agent:dispatch` Step 2b: if the task text starts with `--full`, set `PROFILE="full"` and use the task text without that prefix from here on; otherwise `PROFILE` = `defaults.codexProfile`. If `PROFILE` is `"lean"` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, warn the user and use `"full"`. Both tasks get the same `profile`, so the comparison is between models only.
+
+## Step 2c: Write the Task File
+
+**Never put the task text on a shell command line or into a JavaScript string literal.** Write it to a file:
+
+```bash
+node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); console.log(path.join(dir, 'task-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.txt'));"
+```
+
+Write the task text to that path (`<TASK_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!`. The original text is the `args` of your Skill call. If you only have that escaped copy (for example the command was typed by the user and their raw text is not in the conversation), undo the escaping by replacing every `\!` with `!`, and tell the user you did; this changes only a literal `\!` in the original, which is rare.
+
+Why: pasted code with `"`, a backtick or `$(...)` would break a command line or run part of it, and a task with quotes, backslashes or newlines turns into broken JavaScript when pasted into the Step 5 script. The Step 5 script and Step 8 read `<TASK_FILE>`; `parallel.js` sends the text to each Codex process on stdin.
 
 ## Step 3: Plan-Usage Guard
 
@@ -84,7 +96,7 @@ Determine which models to run in parallel:
     1. **o3-mini + o4-mini** — Compare two mini models
     2. **o4-mini + gpt-4.1** — Compare mini vs full model
     3. **o3-mini + gpt-4.1** — Compare mini vs full model
-  - If the user chooses "Other", parse their custom input for model names
+  - If the user chooses "Other", parse their custom input for model names. Accept a name only if it matches `^[A-Za-z0-9._:/-]+$` (e.g. `gpt-5.2`, `o4-mini`); otherwise say why and ask again. The names are written into the Step 5 script, so nothing else may get through.
 
 Save the two model names (use `null` for "Codex default" / no `-m` flag).
 
@@ -103,9 +115,12 @@ var p = require('C:/Users/RJ/.claude/codex-agent/lib/parallel.js');
 var parser = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js');
 var fs = require('fs');
 
+// The task text comes from the Step 2c file, never from a string literal in this script.
+var taskPrompt = fs.readFileSync(<TASK_FILE_PATH>, 'utf-8');
+
 var tasks = [
-  { prompt: <TASK_PROMPT>, model: <MODEL_A_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> },
-  { prompt: <TASK_PROMPT>, model: <MODEL_B_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> }
+  { prompt: taskPrompt, model: <MODEL_A_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> },
+  { prompt: taskPrompt, model: <MODEL_B_OR_NULL>, workingDir: <CWD>, timeout: <TIMEOUT_MS>, profile: <PROFILE> }
 ];
 
 p.dispatchParallel(tasks, {}, function(err, results) {
@@ -136,7 +151,7 @@ p.dispatchParallel(tasks, {}, function(err, results) {
 });
 ```
 
-Replace `<TASK_PROMPT>`, `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>`, and `<TIMEOUT_MS>` with actual values. Use `null` (not a string) for models that should use Codex's default.
+Replace `<TASK_FILE_PATH>` (the Step 2c path as a quoted string with forward slashes, e.g. `'C:/Users/RJ/AppData/Local/Temp/codex-agent/task-1762650000000-3f2a.txt'`), `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>` (quoted, forward slashes), `<TIMEOUT_MS>` and `<PROFILE>` (quoted, e.g. `'lean'`) with actual values. Write each model as a quoted string (`'o4-mini'`) or `null` (not a string) for Codex's default; only names that passed the Step 4 check go in. The task text itself never appears in the script.
 
 Run the script:
 
@@ -174,7 +189,7 @@ Sum `inputTokens`, `outputTokens`, and `estimatedCost` across all parallel resul
 Create a session and save it:
 
 ```bash
-node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = sl.createSession('parallel', process.argv[1]); console.log(JSON.stringify(session));" "$ARGUMENTS"
+node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var task = require('fs').readFileSync(process.argv[1], 'utf-8'); var session = sl.createSession('parallel', task); console.log(JSON.stringify(session));" "<TASK_FILE>"
 ```
 
 Populate the session with:
@@ -227,6 +242,7 @@ Present a side-by-side comparison:
 
 ## Important Notes
 
+- The task travels in `<TASK_FILE>` (Step 2c): never paste it into a command line or the Step 5 script.
 - Always use forward slashes in file paths passed to `node -e`, even on Windows.
 - Never use backtick characters inside `node -e` command strings.
 - Parallel dispatch uses more tokens than a single dispatch — it counts twice against the Codex plan's 5-hour and weekly windows.

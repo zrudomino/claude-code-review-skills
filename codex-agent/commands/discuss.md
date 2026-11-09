@@ -58,12 +58,24 @@ Extract these values (with defaults if missing):
 
 The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `codex-agent/codex-profiles/lean.config.toml`) switches off browser/desktop automation, all web access and most file-format skills; it keeps shell, git, file reading, AGENTS.md and the pdf + spreadsheets skills. Measured on 0.167.0: a bounded consult fell from ~43.3K to ~33.6K input tokens with the same recommendations.
 
-1. If `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix; from here on use the topic text **without** the prefix wherever `$ARGUMENTS` appears (session creation, prompts, summaries).
+1. If `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix; from here on use the topic text **without** the prefix (topic file, prompts, summaries).
 2. Otherwise `PROFILE` = `defaults.codexProfile` (default `"lean"`).
 3. If `PROFILE` is `lean` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, tell the user "lean Codex profile not installed; using the full config" and set `PROFILE=full`.
 4. `PROFILE_FLAG` = `-p lean` for lean, empty for full. It goes **before** `exec` in every Codex command below.
 
 **Keep the same `PROFILE_FLAG` for every round of this discussion**: round 1, resumed rounds, the full-context fallback and the execution step. Resuming a lean thread without it re-adds the full tool set and misses the prompt cache (measured: 23,233 new input tokens instead of 12,721). Use `--full` when the topic needs web search, the OpenAI docs or browser automation.
+
+### Step 2c: Write the Topic File
+
+**Never put the topic or a round prompt on a shell command line.** Write the topic to a file once, and write each round's prompt to its own file (Step 4a):
+
+```bash
+node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); console.log(path.join(dir, 'topic-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.txt'));"
+```
+
+Write the topic text to that path (`<TOPIC_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!` (seen 2026-11-09 with a pasted JavaScript diff, where `!==` appeared as `\!==`). The original text is the `args` of your Skill call. If you only have that escaped copy (for example the command was typed by the user and their raw text is not in the conversation), undo the escaping by replacing every `\!` with `!`, and tell the user you did; this changes only a literal `\!` in the original, which is rare.
+
+Why: a topic containing `"`, a backtick or `$(...)` (pasted code, a diff, a shell snippet) would break a command line or run part of it as a shell command, and the `\!` escaping would corrupt code sent to Codex. Session creation reads `<TOPIC_FILE>`, and every Codex command below gets its prompt on stdin (`- < "<PROMPT_FILE>"`).
 
 ### Step 3: Plan-Usage Guard
 
@@ -101,7 +113,7 @@ Save the resolved model name as `RESOLVED_MODEL` for use in the summary output.
 Create a session object for logging this discussion:
 
 ```bash
-node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = sl.createSession('discussion', process.argv[1]); console.log(JSON.stringify(session));" "$ARGUMENTS"
+node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var topic = require('fs').readFileSync(process.argv[1], 'utf-8'); var session = sl.createSession('discussion', topic); console.log(JSON.stringify(session));" "<TOPIC_FILE>"
 ```
 
 Save the session object (particularly the `id`) — you will populate it with rounds, usage, and result data throughout the discussion.
@@ -121,12 +133,14 @@ You will now enter a discussion loop with Codex. Track these variables across ro
 Generate temp file paths for this round:
 
 ```bash
-node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); var id = Date.now() + '-' + Math.random().toString(16).slice(2); console.log(JSON.stringify({ lastMsg: path.join(dir, 'last-msg-' + id + '.txt'), stdout: path.join(dir, 'stdout-' + id + '.txt') }));"
+node -e "var os = require('os'); var path = require('path'); var dir = path.join(os.tmpdir(), 'codex-agent'); require('fs').mkdirSync(dir, { recursive: true }); var id = Date.now() + '-' + Math.random().toString(16).slice(2); console.log(JSON.stringify({ lastMsg: path.join(dir, 'last-msg-' + id + '.txt'), stdout: path.join(dir, 'stdout-' + id + '.txt'), prompt: path.join(dir, 'prompt-' + id + '.txt') }));"
 ```
+
+`prompt` is this round's `<PROMPT_FILE>`. Every round (Steps 4b, 6a, 6b, 10b, 10c) gets fresh paths from this command.
 
 #### 4b: Dispatch Round 1
 
-**Facts first**: if you (Claude) already know facts that bear on the topic (versions, measurements, file paths, earlier decisions, what has been ruled out), make sure `$ARGUMENTS` carries them, e.g. as a `FACTS:` block. Codex otherwise spends tool calls re-discovering them: an open-ended round 1 measured on 0.167.0 took 33 model steps and 113,659 uncached input tokens, while a follow-up bounded to a few tool calls added 2,586.
+**Facts first**: if you (Claude) already know facts that bear on the topic (versions, measurements, file paths, earlier decisions, what has been ruled out), put them in the topic, e.g. as a `FACTS:` block after the user's text, and write that fuller topic to `<TOPIC_FILE>` (Step 2c) so every round sees the same text. Codex otherwise spends tool calls re-discovering them: an open-ended round 1 measured on 0.167.0 took 33 model steps and 113,659 uncached input tokens, while a follow-up bounded to a few tool calls added 2,586.
 
 Construct the prompt for Codex. The prompt should be:
 
@@ -134,7 +148,7 @@ Construct the prompt for Codex. The prompt should be:
 You are being consulted for your technical opinion. Do NOT write or modify any code. Instead, analyze and propose an approach for the following topic:
 
 <topic>
-$ARGUMENTS
+<TOPIC: the exact contents of TOPIC_FILE>
 </topic>
 
 Tool budget: use at most 8 tool calls this round (shell commands, MCP calls and web searches combined). Treat facts stated in the topic as given; re-check one only if it looks wrong, and say which.
@@ -146,16 +160,16 @@ Provide:
 4. Suggested implementation steps
 ```
 
-Run codex exec with this prompt.
+Write this prompt to `<PROMPT_FILE>` with the **Write** tool, with the topic inserted exactly as it stands in `<TOPIC_FILE>` (the original text, not the `\!`-escaped copy). Then run codex exec with the prompt on stdin (`-`).
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<the-prompt-above>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **Sandbox**: all discussion rounds (this round, resumed rounds in Step 6a, and the full-context fallback in Step 6b) run `read-only`, so the sandbox enforces the "Do NOT write or modify any code" instruction instead of relying on the prompt. Codex can still read files and run read-only commands. Only the execution step (Step 10) uses `workspace-write`.
@@ -248,10 +262,12 @@ Tool budget: use at most 3 tool calls this round; answer from the context you al
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning. Do NOT write or modify any code.
 ```
 
-**If `sessionId` is available**, run:
+Write the follow-up prompt to this round's `<PROMPT_FILE>` (Step 4a) with the **Write** tool. **If `sessionId` is available**, run:
 ```bash
-codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" "<follow-up-prompt>"
+codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
+
+`exec resume` takes the prompt from stdin when the prompt argument is `-` (same as `exec`).
 
 **Sandbox on resume**: `codex exec resume` has no `-s/--sandbox` flag, so without the `-c 'sandbox_mode=...'` override a resumed round inherits `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). Always pass the override. Verified on 0.167.0: with the override set to `read-only` a write attempt in a resumed round was blocked; without it the write succeeded.
 
@@ -271,7 +287,7 @@ Construct the full-context prompt:
 You are being consulted for your technical opinion. Do NOT write or modify any code. We are in an ongoing discussion about the following topic:
 
 <topic>
-$ARGUMENTS
+<TOPIC: the exact contents of TOPIC_FILE>
 </topic>
 
 DISCUSSION SO FAR:
@@ -289,9 +305,9 @@ Tool budget: use at most 3 tool calls this round; rely on the discussion summary
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning.
 ```
 
-Run with `codex <PROFILE_FLAG> exec --sandbox read-only --json` (not resume):
+Write it to this round's `<PROMPT_FILE>` with the **Write** tool (topic inserted exactly as in `<TOPIC_FILE>`), then run `codex <PROFILE_FLAG> exec --sandbox read-only --json` (not resume):
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<full-context-prompt>"
+codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **Important**: Summarize each prior round concisely (2-3 sentences each) rather than forwarding full text. This keeps Codex's context window manageable and avoids token waste.
@@ -360,14 +376,14 @@ Execute the agreed approach, preferring session resume when a Codex session ID i
 
 #### 10a: Prepare Temp Files
 
-Generate new temp files for the execution round (Step 4a pattern). Both `lastMsg` and `stdout` paths are needed — `lastMsg` will only be populated on the fresh-exec path.
+Generate new temp files for the execution round (Step 4a pattern) and write the short execution prompt (10b) to that `<PROMPT_FILE>` with the **Write** tool.
 
 #### 10b: Resume-First Execution (Preferred)
 
 If the `sessionId` (Codex session ID) from the last discussion round is not null, use `codex exec resume` to execute within the existing session context. Codex already has the full discussion history, so use a **short execution prompt**:
 
 ```bash
-codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" "<execution-prompt>"
+codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 The `-c 'sandbox_mode="workspace-write"'` override is required: resume has no `-s/--sandbox` flag and would otherwise inherit `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). `workspace-write` matches the fresh-exec fallback in Step 10c.
@@ -385,10 +401,10 @@ Include `-m "<codexModel>"` after `--json` if codexModel is not null.
 
 #### 10c: Fallback — Fresh Exec
 
-If `codex exec resume` fails (session not found, resume not supported) or `sessionId` is null, fall back to a fresh `codex exec` with full context:
+If `codex exec resume` fails (session not found, resume not supported) or `sessionId` is null, fall back to a fresh `codex exec` with full context. Get fresh temp paths (Step 4a) and write the **full** execution task to that new `<PROMPT_FILE>` with the **Write** tool; never reuse the short 10b prompt, which assumes the discussion history:
 
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" "<execution-task>"
+codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 Include `-m "<codexModel>"` if codexModel is not null. The execution task should include the full agreed approach from the discussion since Codex won't have prior context.
@@ -485,6 +501,7 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 
 ## Important Notes
 
+- The topic and every prompt travel in files: `<TOPIC_FILE>` (Step 2c) and one `<PROMPT_FILE>` per round (Step 4a), written with the Write tool and sent to Codex as `- < "<PROMPT_FILE>"`. Never paste the topic or a prompt into a command line.
 - Always use forward slashes in file paths passed to `node -e`, even on Windows.
 - Never use backtick characters inside `node -e` command strings — they cause shell escaping issues on Windows.
 - Use `/\r?\n/` for line splitting to handle both Unix and Windows line endings.

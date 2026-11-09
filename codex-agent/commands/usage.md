@@ -64,5 +64,5 @@ Quota guard: warns at [quota.warnPercent, default 80]%, asks before a Codex call
 ## Notes
 
 - The plan percentages come from OpenAI and include usage from every Codex client on the account (your interactive terminal, the Desktop app and codex-agent). The recorded history is codex-agent's own estimate and counts only its calls.
-- The old token-budget limits (`budgets.*` in config.json) are no longer checked (removed 2026-11-09; they were set to 5 billion tokens / $10,000 and never triggered). The quota guard in dispatch, discuss and parallel uses the plan percentages instead.
+- The old token-budget limits (`budgets.*` in config.json) are no longer checked (removed 2026-11-09; they were set to 5 billion tokens / 10,000 USD and never triggered). The quota guard in dispatch, discuss and parallel uses the plan percentages instead.
 - To reset the recorded session counters: `node -e "require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js').resetSession('C:/Users/RJ/.claude/codex-agent/usage-ledger.json')"`

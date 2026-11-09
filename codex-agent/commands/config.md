@@ -207,8 +207,9 @@ If `$ARGUMENTS` contains `=`:
    - `discussion.hardCapRounds` must be greater than `discussion.softCapRounds`
    - `defaults.preferredAgent` must be one of: `"auto"`, `"codex"`, `"claudeSubagent"`
    - `defaults.approvalPolicy` must be one of: `"full-auto"`, `"suggest"`, `"ask"`
-   - `defaults.timeout` must be >= 10000
+   - `defaults.timeout` must be an integer from 10000 to 2147483647 (Node's timer limit: a larger value fires after 1 ms and kills the Codex call)
    - `defaults.codexProfile` must be `"lean"` (use `~/.codex/lean.config.toml`, the default when the key is missing) or `"full"` (the user's normal Codex config). A single call can still override lean with a leading `--full` in its arguments.
+   - `defaults.codexModel` must be `null` or a **string** model slug matching `^[A-Za-z0-9._:/-]+$` (the writer in step 5 keeps it a string even when it looks like a number) (dispatch, discuss and parallel put it on a command line or into `-m`, and refuse anything else). Also run `codex debug models` (local, no tokens) and, if the value is not one of its `slug`s with `visibility` `list`, warn "not in Codex's model catalog" but still save it.
    - `quota.warnPercent` and `quota.askPercent` must be between 1 and 100, and `quota.warnPercent` must be less than `quota.askPercent` (used by the plan-usage guard in dispatch, discuss and parallel; defaults 80 and 95 when missing)
    - `cache.ttlMs` must be >= 60000 (1 minute minimum)
    - `cache.maxEntries` must be >= 1
@@ -218,7 +219,7 @@ If `$ARGUMENTS` contains `=`:
 
 5. **Write the updated config** using atomic write:
    ```bash
-   node -e "var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var key = process.argv[1]; var value = process.argv[2]; var parts = key.split('.'); var obj = config; for (var i = 0; i < parts.length - 1; i++) { obj = obj[parts[i]]; } var lastKey = parts[parts.length - 1]; var oldValue = obj[lastKey]; var newValue = value; if (value === 'null') { newValue = null; } else if (value === 'true') { newValue = true; } else if (value === 'false') { newValue = false; } else if (!isNaN(Number(value)) && value.trim() !== '') { newValue = Number(value); } obj[lastKey] = newValue; var configPath = 'C:/Users/RJ/.claude/codex-agent/config.json'; var tmpPath = configPath + '.tmp-' + process.pid; fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf-8'); fs.renameSync(tmpPath, configPath); console.log(JSON.stringify({ oldValue: oldValue, newValue: newValue }));" "<THE_KEY_PART>" "<THE_VALUE_PART>"
+   node -e "var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var key = process.argv[1]; var value = process.argv[2]; var parts = key.split('.'); var obj = config; for (var i = 0; i < parts.length - 1; i++) { obj = obj[parts[i]]; } var lastKey = parts[parts.length - 1]; var oldValue = obj[lastKey]; var newValue = value; if (value === 'null') { newValue = null; } else if (value === 'true') { newValue = true; } else if (value === 'false') { newValue = false; } else if (key !== 'defaults.codexModel' && !isNaN(Number(value)) && value.trim() !== '') { newValue = Number(value); } obj[lastKey] = newValue; var configPath = 'C:/Users/RJ/.claude/codex-agent/config.json'; var tmpPath = configPath + '.tmp-' + process.pid; fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf-8'); fs.renameSync(tmpPath, configPath); console.log(JSON.stringify({ oldValue: oldValue, newValue: newValue }));" "<THE_KEY_PART>" "<THE_VALUE_PART>"
    ```
 
 6. **Confirm the change**:

@@ -56,13 +56,13 @@ Then write the default config.json with these values:
 - defaults: approvalPolicy=full-auto, timeout=300000, codexModel=null
 - routing.budgetWarningPercent=80
 
-Also extract the `defaults.codexModel` value for use in Step 6.
+Also extract the `defaults.codexModel` value for use in Step 6. If `defaults.codexModel` is not null and is not a string matching `^[A-Za-z0-9._:/-]+$` (a model slug as listed by `codex debug models`), stop: "`defaults.codexModel` is not a valid model name; set it with `/codex-agent:config defaults.codexModel=<slug>` or `null`." The value goes into a command line, so nothing else may get through.
 
 ## Step 2b: Select Codex Profile
 
 Codex loads every enabled plugin, MCP server and connector into each model step. The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `codex-agent/codex-profiles/lean.config.toml`) switches off browser/desktop automation, all web access (native search, OpenAI docs MCP, ChatGPT connectors) and most file-format skills. It keeps shell, git, file reading, AGENTS.md and the pdf + spreadsheets skills. Measured on Codex 0.167.0: a trivial call fell from 17,140 to 12,695 input tokens and a bounded consult from ~43.3K to ~33.6K, with the same answers and the same review finding.
 
-1. **Per-call override**: if `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix. From here on, wherever `$ARGUMENTS` appears (routing, cache key, prompts, logs), use the task text **without** the prefix.
+1. **Per-call override**: if `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix. If nothing but whitespace is left after removing the prefix, show the Step 1 usage message and stop. From here on, wherever `$ARGUMENTS` appears (routing, cache key, prompts, logs), use the task text **without** the prefix.
 2. Otherwise `PROFILE` = `defaults.codexProfile` from config (default `"lean"` when missing).
 3. If `PROFILE` is `lean`, check that the profile file exists: `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`). If it is missing, tell the user "lean Codex profile not installed; using the full config" and set `PROFILE=full`.
 4. `PROFILE_FLAG` = `-p lean` for lean, empty for full. Every Codex command in Step 6 starts `codex <PROFILE_FLAG> exec`: `-p` is a global option and must come **before** `exec`.
@@ -407,31 +407,18 @@ If this step fails, log the error but do not stop — caching is optional.
 
 ### Step 9e: Save Session
 
-Then save the session log with all collected data. Build the session JSON with:
-- `routing`: the routing result from Step 4 (agent, confidence, reason)
-- `model`: the RESOLVED_MODEL from Step 6e (the actual model, not null)
-- `rounds`: a single round with the task prompt, Codex response (truncated to 2000 chars), usage, and timestamp
-- `result`: `{ status, filesChanged, usage }` from Step 8
-- `error`: `{ code, message }` if an error occurred, or `null`
-
-```bash
-node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var session = JSON.parse(process.argv[1]); sl.saveSession('C:/Users/RJ/.claude/codex-agent/sessions', session); console.log('session saved: ' + session.id);" "<SESSION_JSON>"
-```
-
-Where `<SESSION_JSON>` is the complete session object serialized as a JSON string. Build this from the session created in Step 5, populated with:
+Save the session log with all collected data. Build the session object from the one created in Step 5:
 - `session.model` = the RESOLVED_MODEL from Step 6e (the actual model, not null)
 - `session.routing` = `{ agent, confidence, reason }` from Step 4
-- `session.rounds` = one entry with `{ prompt: <the task text from TASK_FILE>, response: "<result text truncated to 2000>", usage: <usage from Step 8>, timestamp: "<ISO>" }`
+- `session.rounds` = one entry `{ prompt: <the task text from TASK_FILE>, response: <result text truncated to 2000>, usage: <usage from Step 8>, timestamp: <ISO> }`
+- `session.result` = `{ status, filesChanged, usage }` from Step 8
+- `session.error` = `null`, or `{ code: "<ERROR_CODE>", message: "<error text>" }` if an error occurred
+- `session.sessionId` = the Codex session ID from Step 8 (may be null)
 
-The session JSON contains the task and Codex's response, so always use the temp-file variant below (write the JSON with the Write tool), never the inline `process.argv[1]` form.
-- `session.result` = `{ status: "<status>", filesChanged: [<files>], usage: <usage> }`
-- `session.error` = `null` (or `{ code: "<ERROR_CODE>", message: "<error text>" }` if an error occurred)
-- `session.sessionId` = the Codex session ID from Step 8 parse result (may be null)
-
-**Note**: If the session JSON is large, you can alternatively save it by writing to a temp file and having session-logger read it:
+The session holds the task and Codex's response, so it never goes on a command line: write it as JSON to a temp file with the **Write** tool, then run:
 
 ```bash
-node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var fs = require('fs'); var session = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); sl.saveSession('C:/Users/RJ/.claude/codex-agent/sessions', session); console.log('session saved: ' + session.id);" "<TEMP_FILE_WITH_SESSION_JSON>"
+node -e "var sl = require('C:/Users/RJ/.claude/codex-agent/lib/session-logger.js'); var fs = require('fs'); var session = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); sl.saveSession('C:/Users/RJ/.claude/codex-agent/sessions', session); console.log('session saved: ' + session.id);" "<SESSION_FILE>"
 ```
 
 ## Step 10: Return Summary

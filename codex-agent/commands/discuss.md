@@ -54,11 +54,13 @@ Extract these values (with defaults if missing):
 - `defaults.codexModel` (default: null)
 - `defaults.codexProfile` (default: `"lean"`)
 
+If `defaults.codexModel` is not null and is not a string matching `^[A-Za-z0-9._:/-]+$` (a model slug as listed by `codex debug models`), stop: "`defaults.codexModel` is not a valid model name; set it with `/codex-agent:config defaults.codexModel=<slug>` or `null`." The value goes into a command line, so nothing else may get through.
+
 ### Step 2b: Select Codex Profile (once per discussion)
 
 The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `codex-agent/codex-profiles/lean.config.toml`) switches off browser/desktop automation, all web access and most file-format skills; it keeps shell, git, file reading, AGENTS.md and the pdf + spreadsheets skills. Measured on 0.167.0: a bounded consult fell from ~43.3K to ~33.6K input tokens with the same recommendations.
 
-1. If `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix; from here on use the topic text **without** the prefix (topic file, prompts, summaries).
+1. If `$ARGUMENTS` starts with `--full` (followed by whitespace or the end), set `PROFILE=full` and remove that prefix; from here on use the topic text **without** the prefix (topic file, prompts, summaries). If nothing but whitespace is left after removing the prefix, show the Step 1 usage message and stop.
 2. Otherwise `PROFILE` = `defaults.codexProfile` (default `"lean"`).
 3. If `PROFILE` is `lean` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, tell the user "lean Codex profile not installed; using the full config" and set `PROFILE=full`.
 4. `PROFILE_FLAG` = `-p lean` for lean, empty for full. It goes **before** `exec` in every Codex command below.
@@ -74,6 +76,8 @@ node -e "var os = require('os'); var path = require('path'); var dir = path.join
 ```
 
 Write the topic text to that path (`<TOPIC_FILE>`) with the **Write** tool: exactly the text given to this command, minus a `--full` prefix (Step 2b). Use the original text you passed in, **not** the copy shown at the top of this file: the harness that loads this command shows every `!` in the arguments as `\!` (seen 2026-11-09 with a pasted JavaScript diff, where `!==` appeared as `\!==`). The original text is the `args` of your Skill call. If you only have that escaped copy (for example the command was typed by the user and their raw text is not in the conversation), undo the escaping by replacing every `\!` with `!`, and tell the user you did; this changes only a literal `\!` in the original, which is rare.
+
+**Facts first**: if you (Claude) already know facts that bear on the topic (versions, measurements, file paths, earlier decisions, what has been ruled out), add them now as a `FACTS:` block after the user's text, and write that fuller topic to `<TOPIC_FILE>`. The file is written once, here, before Step 3c records the session, and every round inserts the same text. Codex otherwise spends tool calls re-discovering the facts: an open-ended round 1 measured on 0.167.0 took 33 model steps and 113,659 uncached input tokens, while a follow-up bounded to a few tool calls added 2,586.
 
 Why: a topic containing `"`, a backtick or `$(...)` (pasted code, a diff, a shell snippet) would break a command line or run part of it as a shell command, and the `\!` escaping would corrupt code sent to Codex. Session creation reads `<TOPIC_FILE>`, and every Codex command below gets its prompt on stdin (`- < "<PROMPT_FILE>"`).
 
@@ -140,7 +144,7 @@ node -e "var os = require('os'); var path = require('path'); var dir = path.join
 
 #### 4b: Dispatch Round 1
 
-**Facts first**: if you (Claude) already know facts that bear on the topic (versions, measurements, file paths, earlier decisions, what has been ruled out), put them in the topic, e.g. as a `FACTS:` block after the user's text, and write that fuller topic to `<TOPIC_FILE>` (Step 2c) so every round sees the same text. Codex otherwise spends tool calls re-discovering them: an open-ended round 1 measured on 0.167.0 took 33 model steps and 113,659 uncached input tokens, while a follow-up bounded to a few tool calls added 2,586.
+**Facts first** happens in Step 2c: the topic file already carries what you knew. Do not rewrite `<TOPIC_FILE>` now; the session recorded it in Step 3c.
 
 Construct the prompt for Codex. The prompt should be:
 

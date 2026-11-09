@@ -109,6 +109,8 @@ node -e "var os = require('os'); var path = require('path'); var dir = path.join
 
 #### 4b: Dispatch Round 1
 
+**Facts first**: if you (Claude) already know facts that bear on the topic (versions, measurements, file paths, earlier decisions, what has been ruled out), make sure `$ARGUMENTS` carries them, e.g. as a `FACTS:` block. Codex otherwise spends tool calls re-discovering them: an open-ended round 1 measured on 0.167.0 took 33 model steps and 113,659 uncached input tokens, while a follow-up bounded to a few tool calls added 2,586.
+
 Construct the prompt for Codex. The prompt should be:
 
 ```
@@ -117,6 +119,8 @@ You are being consulted for your technical opinion. Do NOT write or modify any c
 <topic>
 $ARGUMENTS
 </topic>
+
+Tool budget: use at most 8 tool calls this round (shell commands, MCP calls and web searches combined). Treat facts stated in the topic as given; re-check one only if it looks wrong, and say which.
 
 Provide:
 1. Your recommended approach
@@ -158,10 +162,12 @@ For errors 1, 2, and 4 (unrecoverable in a discussion), save the session with th
 Save stdout to the stdout temp file, then parse:
 
 ```bash
-node -e "var p = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js'); var fs = require('fs'); var lastMsg = ''; try { lastMsg = fs.readFileSync('<lastMsg-temp-path>', 'utf-8'); } catch(e) {} var stdout = ''; try { stdout = fs.readFileSync('<stdout-temp-path>', 'utf-8'); } catch(e) {} var result = p.parseCodexOutput(stdout, lastMsg); console.log(JSON.stringify(result));"
+node -e "var p = require('C:/Users/RJ/.claude/codex-agent/lib/parse-output.js'); var fs = require('fs'); var lastMsg = ''; try { lastMsg = fs.readFileSync('<lastMsg-temp-path>', 'utf-8'); } catch(e) {} var stdout = ''; try { stdout = fs.readFileSync('<stdout-temp-path>', 'utf-8'); } catch(e) {} var prev = process.argv[1] ? JSON.parse(process.argv[1]) : null; var result = p.parseCodexOutput(stdout, lastMsg, prev); console.log(JSON.stringify(result));" '<previous-threadTotals-json-or-empty>'
 ```
 
-Save the `sessionId` from the parse result (may be null). This will be used for session resume in subsequent rounds.
+**The argument**: pass `''` (empty) for a fresh `codex exec` — this round, the Step 6b fallback and the Step 10c fallback each start a new thread. For a **resumed** round (Step 6a, Step 10b) pass the previous round's `threadTotals` as JSON, e.g. `'{"inputTokens":2157179,"cachedInputTokens":2043520,"outputTokens":7313,"totalTokens":2164492,"estimatedCost":0}'`. Reason: `codex exec resume` reports the thread's cumulative usage, so without it every resumed round would be recorded again on top of all earlier rounds. The result's `usage` is then this round only (`usageMode: "delta"`); `usageMode: "raw-fallback"` means the totals went down and `usage` was left as reported — note it in the session.
+
+Save the `sessionId` and the `threadTotals` from the parse result (`sessionId` may be null). Both are used by the next resumed round.
 
 #### 4d: Record Round 1 Usage
 
@@ -169,7 +175,7 @@ Save the `sessionId` from the parse result (may be null). This will be used for 
 node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); ut.recordUsage('C:/Users/RJ/.claude/codex-agent/usage-ledger.json', 'codex', { inputTokens: <INPUT_TOKENS>, outputTokens: <OUTPUT_TOKENS>, estimatedCost: <COST> }); console.log('recorded');"
 ```
 
-Replace `<INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with actual values from the parse result.
+Replace `<INPUT_TOKENS>`, `<OUTPUT_TOKENS>`, and `<COST>` with actual values from the parse result's `usage` (this round only), never from `threadTotals`.
 
 Add the usage to your running cumulativeUsage totals.
 
@@ -220,6 +226,8 @@ Construct a **shorter** follow-up prompt (no history replay needed):
 CURRENT FEEDBACK from reviewer:
 <Claude's specific follow-up question, counterpoint, or concern for this round>
 
+Tool budget: use at most 3 tool calls this round; answer from the context you already have where possible.
+
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning. Do NOT write or modify any code.
 ```
 
@@ -259,6 +267,8 @@ Round <N>:
 CURRENT FEEDBACK:
 <Claude's specific follow-up question, counterpoint, or concern for this round>
 
+Tool budget: use at most 3 tool calls this round; rely on the discussion summary above where possible.
+
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning.
 ```
 
@@ -272,6 +282,8 @@ codex exec --sandbox read-only --json -C "<current-working-directory>" --output-
 #### 6c: Parse and Record
 
 After each round (whether resume or fallback), parse the output and extract `sessionId` for the next round. Update the saved `sessionId` with the latest value from each parse result.
+
+Parse with the Step 4c command: for a resumed round (6a) pass the previous round's `threadTotals`; for the full-context fallback (6b) pass `''` (it starts a new thread). Then replace the saved `threadTotals` with this round's value.
 
 **Note on resume parsing**: When resume was used (Step 6a), `--output-last-message` IS supported on modern Codex CLI versions and may be used to capture the final message. The parser (`parseCodexOutput`) also extracts the response from JSONL stdout (`lastAgentMessage` from `agent_message` events) as a fallback when the lastMsg file is empty.
 
@@ -368,7 +380,7 @@ Include `-m "<codexModel>"` if codexModel is not null. The execution task should
 
 #### 10d: Parse Output
 
-Parse the output (Step 4c pattern). For the resume path (10b), the `lastMsg` file will be empty — the parser extracts the response from JSONL stdout, which works correctly.
+Parse the output (Step 4c pattern): for the resume path (10b) pass the last discussion round's `threadTotals`; for the fresh-exec path (10c) pass `''`. For the resume path (10b), the `lastMsg` file will be empty — the parser extracts the response from JSONL stdout, which works correctly.
 
 #### 10e: Record Usage
 
@@ -464,4 +476,5 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 - Use `os.tmpdir()` for temp files — never hardcode temp paths.
 - If parse-output returns zero tokens but Codex clearly ran, note that some Codex versions may not emit usage in JSONL. The result text is still valid.
 - When summarizing prior rounds for context-forwarding, be concise — 2-3 sentences per round maximum. Long context wastes Codex's tokens and can cause confusion.
+- Tool budgets (8 in round 1, 3 in follow-up rounds, none in the execution step) are prompt instructions, not enforced limits: Codex may slightly exceed them (asked for 3, used 4 in testing). They exist because in a tool-using turn every model step re-sends the growing transcript, so cost scales with the number of steps. Web search and plugin tools stay available in discussion rounds for now; switching them off needs the plugin set settled (a single `-c web_search="disabled"` does not stop browsing via plugin tools).
 - The "Do NOT write or modify any code" instruction in discussion prompts is critical — it prevents Codex from making changes during the negotiation phase. Only the execution dispatch (Step 10) should produce code changes.

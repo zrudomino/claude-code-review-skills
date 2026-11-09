@@ -89,14 +89,18 @@ Determine which models to run in parallel:
 - Model B = default (no `-m` flag — Codex's built-in default)
 - Tell the user: "Running parallel dispatch: **[configured model]** vs **Codex default**"
 
-**If `defaults.codexModel` is null** (no model configured):
-- Use AskUserQuestion to ask which models to compare:
-  - Question: "Which models should we compare in parallel?"
-  - Options:
-    1. **o3-mini + o4-mini** — Compare two mini models
-    2. **o4-mini + gpt-4.1** — Compare mini vs full model
-    3. **o3-mini + gpt-4.1** — Compare mini vs full model
-  - If the user chooses "Other", parse their custom input for model names. Accept a name only if it matches `^[A-Za-z0-9._:/-]+$` (e.g. `gpt-5.2`, `o4-mini`); otherwise say why and ask again. The names are written into the Step 5 script, so nothing else may get through.
+**If `defaults.codexModel` is null** (no model configured), offer the models from Codex's own catalog (local, no tokens, ~1 s):
+
+```bash
+codex debug models | node -e "var j = JSON.parse(require('fs').readFileSync(0, 'utf-8')); var m = (j.models || []).filter(function (x) { return x.visibility === 'list'; }).sort(function (a, b) { return a.priority - b.priority; }); console.log(JSON.stringify(m.map(function (x) { return { slug: x.slug, name: x.display_name, description: x.description }; })));"
+```
+
+- `CODEX_DEFAULT` = the `model` value in `~/.codex/config.toml` (the Step 3b command in `/codex-agent:discuss` reads it). Profiles such as `lean` inherit it (verified 2026-11-09: lean runs used it).
+- Use AskUserQuestion with `multiSelect: true`. Question: "Which two models should run in parallel? Codex default: <CODEX_DEFAULT>." Options: **<CODEX_DEFAULT> (Codex default)** first, then the first three catalog models by priority that are not the default, each with its catalog `description`. Never offer model names that are not in the catalog output.
+- The user must end up with exactly two models; otherwise say so and ask again.
+- A name typed via "Other" is accepted only if it matches `^[A-Za-z0-9._:/-]+$` **and** is a `slug` in the catalog output; otherwise say why and ask again. The names are written into the Step 5 script, so nothing else may get through.
+- If `codex debug models` fails, ask the user to name two models (Other only) and accept only names matching `^[A-Za-z0-9._:/-]+$`.
+- For the Codex default use `null` in Step 5 (no `-m` flag), so it runs exactly as a normal dispatch.
 
 Save the two model names (use `null` for "Codex default" / no `-m` flag).
 
@@ -151,7 +155,7 @@ p.dispatchParallel(tasks, {}, function(err, results) {
 });
 ```
 
-Replace `<TASK_FILE_PATH>` (the Step 2c path as a quoted string with forward slashes, e.g. `'C:/Users/RJ/AppData/Local/Temp/codex-agent/task-1762650000000-3f2a.txt'`), `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>` (quoted, forward slashes), `<TIMEOUT_MS>` and `<PROFILE>` (quoted, e.g. `'lean'`) with actual values. Write each model as a quoted string (`'o4-mini'`) or `null` (not a string) for Codex's default; only names that passed the Step 4 check go in. The task text itself never appears in the script.
+Replace `<TASK_FILE_PATH>` (the Step 2c path as a quoted string with forward slashes, e.g. `'C:/Users/RJ/AppData/Local/Temp/codex-agent/task-1762650000000-3f2a.txt'`), `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>` (quoted, forward slashes), `<TIMEOUT_MS>` and `<PROFILE>` (quoted, e.g. `'lean'`) with actual values. Write each model as a quoted string (`'gpt-6.1-sol'`) or `null` (not a string) for Codex's default; only names that passed the Step 4 check go in. The task text itself never appears in the script.
 
 Both tasks run `workspace-write` (and `parallel.js` passes `--skip-git-repo-check`, so they also run outside a git repository). If `git -C "<current-working-directory>" rev-parse --is-inside-work-tree` does not print `true` (it fails outside a repository, and prints `false` inside a `.git` folder), tell the user in one line before running: "Not in a git worktree: Codex can write here, and its changes can't be undone with git."
 

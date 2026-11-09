@@ -154,8 +154,8 @@ After the tables, show this help text:
 >
 > Examples:
 > - `/codex-agent:config defaults.timeout=600000`
-> - `/codex-agent:config defaults.codexModel=o3-mini`
-> - `/codex-agent:config budgets.codex.maxCostPerSession=10`
+> - `/codex-agent:config defaults.codexModel=gpt-6.1-sol` (a `slug` from `codex debug models`)
+> - `/codex-agent:config quota.warnPercent=85`
 > - `/codex-agent:config routing.budgetWarningPercent=90`
 > - `/codex-agent:config cache.enabled=false`
 > - `/codex-agent:config cache.ttlMs=7200000`

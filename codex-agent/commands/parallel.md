@@ -54,16 +54,19 @@ Extract these values:
 
 Same rule as `/codex-agent:dispatch` Step 2b: if `$ARGUMENTS` starts with `--full`, set `PROFILE="full"` and use the task text without that prefix from here on; otherwise `PROFILE` = `defaults.codexProfile`. If `PROFILE` is `"lean"` and `test -f "${CODEX_HOME:-$HOME/.codex}/lean.config.toml"` (Codex reads profiles from `$CODEX_HOME`, default `~/.codex`) fails, warn the user and use `"full"`. Both tasks get the same `profile`, so the comparison is between models only.
 
-## Step 3: Budget Check
+## Step 3: Plan-Usage Guard
 
-Run the budget check:
+Same guard as `/codex-agent:dispatch` Step 3:
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = ut.checkBudget(ledger, config, 'codex'); console.log(JSON.stringify(result));"
+node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" guard
 ```
 
-- If `allowed` is `false`: Report the budget reason to the user and stop.
-- If `sessionPercent` or `lifetimePercent` is > 80: Warn that budget is running high. Note that parallel dispatch uses more tokens than a single dispatch. Ask the user if they want to proceed.
+- `"ok"`: proceed. `"unknown"`: note that plan usage is unavailable and proceed.
+- `"warn"`: warn that plan usage is high ([reasons]) and that a parallel dispatch runs two Codex calls; ask the user whether to proceed.
+- `"ask"`: use AskUserQuestion ("Codex plan usage is high: [reasons]. Run two Codex calls anyway?") with **Proceed** / **Cancel**; stop unless Proceed.
+
+(The old token-budget check was removed on 2026-11-09; its limits never triggered.)
 
 ## Step 4: Select Models
 
@@ -119,6 +122,7 @@ p.dispatchParallel(tasks, {}, function(err, results) {
       r.parsedUsage = parsed.usage;
       r.parsedFilesChanged = parsed.filesChanged;
       r.parsedStatus = parsed.status || r.status;
+      r.parsedSessionId = parsed.sessionId; // Codex thread id, for the plan-usage line in Step 9
     } else {
       r.parsedResult = r.result || '';
       r.parsedUsage = r.usage || { inputTokens: 0, outputTokens: 0, estimatedCost: 0 };
@@ -215,6 +219,8 @@ Present a side-by-side comparison:
 - Total: [N] tokens
 - Estimated Cost: $[X.XX]
 
+**Codex plan**: [the `line` printed by `node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" line <thread id of the call that finished last>` (the thread id is in each result's parsed output); free, read from that call's session record, e.g. "5h 12% (resets 06:37) · week 23% (resets Wed 11 Nov 09:40)"]
+
 **Session ID**: [session id]
 
 ---
@@ -223,6 +229,6 @@ Present a side-by-side comparison:
 
 - Always use forward slashes in file paths passed to `node -e`, even on Windows.
 - Never use backtick characters inside `node -e` command strings.
-- Parallel dispatch uses more tokens than a single dispatch — warn users about budget impact.
+- Parallel dispatch uses more tokens than a single dispatch — it counts twice against the Codex plan's 5-hour and weekly windows.
 - The temp script file can be cleaned up after execution but is left for debugging if needed.
 - If one model fails but the other succeeds, still present both results — the user can see which model performed better.

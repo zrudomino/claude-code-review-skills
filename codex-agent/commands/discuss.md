@@ -52,7 +52,6 @@ Extract these values (with defaults if missing):
 - `discussion.hardCapRounds` (default: 8)
 - `defaults.timeout` (default: 300000)
 - `defaults.codexModel` (default: null)
-- `routing.budgetWarningPercent` (default: 80)
 - `defaults.codexProfile` (default: `"lean"`)
 
 ### Step 2b: Select Codex Profile (once per discussion)
@@ -66,16 +65,22 @@ The `lean` profile (`~/.codex/lean.config.toml`; source in the skills repo at `c
 
 **Keep the same `PROFILE_FLAG` for every round of this discussion**: round 1, resumed rounds, the full-context fallback and the execution step. Resuming a lean thread without it re-adds the full tool set and misses the prompt cache (measured: 23,233 new input tokens instead of 12,721). Use `--full` when the topic needs web search, the OpenAI docs or browser automation.
 
-### Step 3: Budget Check
+### Step 3: Plan-Usage Guard
 
-Run this budget check:
+Check the Codex plan quota (the percentages Codex's `/status` shows) before round 1:
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var result = ut.checkBudget(ledger, config, 'codex'); console.log(JSON.stringify(result));"
+node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" guard
 ```
 
-- If `allowed` is `false`: Report the budget reason to the user and stop. Suggest running `/codex-agent:usage` to check spend or editing config to raise limits.
-- If `sessionPercent` or `lifetimePercent` is > the budgetWarningPercent: Warn the user that budget is running high but proceed.
+It uses the newest session-record snapshot when it is at most 30 minutes old (free), otherwise a live query (~1.5-2 s, no tokens). Thresholds: `quota.warnPercent` (default 80) and `quota.askPercent` (default 95). Act on `level`:
+
+- `"ok"`: proceed silently.
+- `"warn"`: tell the user in one line ("Codex plan usage high: [reasons]") and proceed.
+- `"ask"`: use AskUserQuestion: "Codex plan usage is high: [reasons]. The window resets [resetsAt, local time]. Start the discussion anyway?" with options **Proceed** and **Cancel**. Stop unless the user chooses Proceed.
+- `"unknown"`: note "Codex plan usage unavailable ([reasons])" and proceed.
+
+(The old token-budget check was removed on 2026-11-09; its limits never triggered.)
 
 ### Step 3b: Resolve Actual Model Name
 
@@ -326,15 +331,13 @@ Options:
 
 If `roundNumber` equals `hardCapRounds`: Stop unconditionally. Save the session and present the full discussion summary to the user (see Phase D format) without executing. Note that the hard cap was reached and the user can manually dispatch execution if desired.
 
-### Step 8: Budget Check Per Round
+### Step 8: Plan-Usage Check Per Round
 
-Before each round (including Round 1), re-run the budget check from Step 3. If the budget is now exhausted mid-discussion:
+Before each follow-up round, re-run the Step 3 guard. It reads the snapshot that the previous round just wrote to its session record, so it is free (~0.1 s). On `"warn"` mention it in one line and continue. On `"ask"` use AskUserQuestion ("Codex plan usage is high: [reasons]. Continue the discussion?") with options **Continue** and **Stop here**. If the user stops:
 
-1. Save the session with current data and an error `{ code: "BUDGET_EXHAUSTED", message: "Budget exhausted during discussion" }`
+1. Save the session with current data and an error `{ code: "PLAN_QUOTA_HIGH", message: "<reasons>" }`
 2. Present what has been discussed so far (all rounds in the discussion summary format)
-3. Note that the budget was exhausted during discussion
-4. Suggest the user raise limits via config or run `/codex-agent:usage` to review spend
-5. Stop without executing
+3. Stop without executing
 
 ## Phase C: Execution
 
@@ -444,7 +447,7 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 - Total: [N] tokens
 - Estimated Cost: $[X.XX]
 
-**Budget**: Session [X]% | Lifetime [X]%
+**Codex plan**: [the `line` printed by `node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" line <sessionId>` with the Codex thread id of the last round; free, read from its session record]
 
 **Session ID**: [session id]
 
@@ -474,7 +477,7 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 - Total: [N] tokens
 - Estimated Cost: $[X.XX]
 
-**Budget**: Session [X]% | Lifetime [X]%
+**Codex plan**: [the `line` printed by `node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" line <sessionId>` with the Codex thread id of the last round; free, read from its session record]
 
 **Session ID**: [session id]
 

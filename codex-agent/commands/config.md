@@ -80,7 +80,14 @@ If `$ARGUMENTS` is empty or missing, display the current configuration as format
 
 ### Codex Agent — Configuration
 
-**Budgets — Codex**
+**Plan-usage guard** (Codex plan quota as in Codex's `/status`; see `/codex-agent:usage`)
+
+| Setting | Value |
+|---------|-------|
+| Warn at (`quota.warnPercent`) | [N, default 80]% |
+| Ask before a Codex call at (`quota.askPercent`) | [N, default 95]% |
+
+**Budgets — Codex** (recorded for history only: the budget check was removed on 2026-11-09)
 
 | Setting | Value |
 |---------|-------|
@@ -202,6 +209,7 @@ If `$ARGUMENTS` contains `=`:
    - `defaults.approvalPolicy` must be one of: `"full-auto"`, `"suggest"`, `"ask"`
    - `defaults.timeout` must be >= 10000
    - `defaults.codexProfile` must be `"lean"` (use `~/.codex/lean.config.toml`, the default when the key is missing) or `"full"` (the user's normal Codex config). A single call can still override lean with a leading `--full` in its arguments.
+   - `quota.warnPercent` and `quota.askPercent` must be between 1 and 100, and `quota.warnPercent` must be less than `quota.askPercent` (used by the plan-usage guard in dispatch, discuss and parallel; defaults 80 and 95 when missing)
    - `cache.ttlMs` must be >= 60000 (1 minute minimum)
    - `cache.maxEntries` must be >= 1
    - `routing.historyMaxEntries` must be >= 10

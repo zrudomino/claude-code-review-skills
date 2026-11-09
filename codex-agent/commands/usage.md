@@ -1,86 +1,68 @@
 ---
 name: codex-agent:usage
-description: Show token usage and budget status for all agents
+description: Show Codex plan usage (5-hour, weekly and monthly %, as in Codex's /status) and recorded dispatch history
 allowed-tools:
   - Bash
   - Read
 ---
 
-# Codex Agent — Usage Dashboard
+# Codex Agent — Usage
 
-Display current token usage, cost tracking, and budget status for all agents (Codex and Claude subagent).
+Show the Codex plan usage that Codex's `/status` shows, plus the token history codex-agent has recorded.
 
-## Step 1: Load Data
-
-Read the config file at `~/.claude/codex-agent/config.json`.
-
-Then check if the usage ledger exists at `~/.claude/codex-agent/usage-ledger.json`. If it does not exist, report:
-
-> **No usage data yet.** No dispatches have been recorded. Run `/codex-agent:dispatch <task>` to get started.
-
-Then stop.
-
-## Step 2: Gather Budget Status
-
-Run a single node command to load ledger, config, and check budget for both agents:
+## Step 1: Plan Usage (live)
 
 ```bash
-node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); var fs = require('fs'); var config = JSON.parse(fs.readFileSync('C:/Users/RJ/.claude/codex-agent/config.json', 'utf-8')); var ledger = ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json'); var codex = ut.checkBudget(ledger, config, 'codex'); var claude = ut.checkBudget(ledger, config, 'claudeSubagent'); console.log(JSON.stringify({ ledger: ledger, codex: codex, claude: claude, config: config }));"
+node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" live
 ```
 
-Parse the JSON output to get all data needed for display.
+This asks a short-lived `codex app-server` for `account/rateLimits/read`: about 1.5-2 s, **no model turn and no tokens** (verified on Codex CLI 0.167.0, 2026-11-09: no session record is created and the percentages do not move). It returns the 5-hour and weekly windows, the team plan's monthly per-user limit (`monthly`) and the number of free rate-limit resets.
+
+If the result has `error` (for example the experimental app-server protocol changed), fall back to the newest snapshot from any session record (free, 5-hour + weekly only) and say how old it is:
+
+```bash
+node "C:/Users/RJ/.claude/codex-agent/lib/plan-usage.js" latest
+```
+
+## Step 2: Recorded History
+
+If `~/.claude/codex-agent/usage-ledger.json` exists, load it:
+
+```bash
+node -e "var ut = require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js'); console.log(JSON.stringify(ut.loadLedger('C:/Users/RJ/.claude/codex-agent/usage-ledger.json')));"
+```
+
+If it does not exist, show "No dispatches recorded yet" in the history section.
 
 ## Step 3: Format Output
 
-Present the data in this format:
+Show reset times in local time. Never show the account id.
 
 ---
 
-### Codex Agent — Usage Dashboard
+### Codex Plan Usage ([live | session record, N min old] · plan: [planType])
 
-**Session** (started: [session startedAt timestamp])
+| Window | Used | Resets |
+|--------|------|--------|
+| 5 hours | [N]% | [local time] |
+| Weekly | [N]% | [local date + time] |
+| Monthly (per-user limit) | [N]% ([used] of [limit]) | [local date] |
 
-| Agent | Dispatches | Input Tokens | Output Tokens | Total Tokens | Est. Cost | Budget Used | Status |
-|-------|-----------|-------------|--------------|-------------|----------|------------|--------|
-| Codex | [N] | [N] | [N] | [N] | $[X.XX] | [X.X]% | [status] |
-| Claude Subagent | [N] | [N] | [N] | [N] | $[X.XX] | [X.X]% | [status] |
+Free rate-limit resets available: [N]. [If `limitReached` is not null: **Limit reached: [type]**]
 
-**Lifetime**
+Quota guard: warns at [quota.warnPercent, default 80]%, asks before a Codex call at [quota.askPercent, default 95]%.
 
-| Agent | Dispatches | Input Tokens | Output Tokens | Total Tokens | Est. Cost | Budget Used | Status |
-|-------|-----------|-------------|--------------|-------------|----------|------------|--------|
-| Codex | [N] | [N] | [N] | [N] | $[X.XX] | [X.X]% | [status] |
-| Claude Subagent | [N] | [N] | [N] | [N] | $[X.XX] | [X.X]% | [status] |
+**Recorded history** (since [session startedAt])
 
-**Configuration**
-
-| Setting | Value |
-|---------|-------|
-| Preferred Agent | [auto/codex/claudeSubagent] |
-| Budget Warning Threshold | [N]% |
-| Large Context Threshold | [N] chars |
-| Codex Session Limit | [N] tokens / $[X.XX] |
-| Codex Lifetime Limit | [N] tokens / $[X.XX] |
-| Claude Session Limit | [N] tokens / $[X.XX] |
-| Claude Lifetime Limit | [N] tokens / $[X.XX] |
-| Discussion Soft Cap | [N] rounds |
-| Discussion Hard Cap | [N] rounds |
+| | Dispatches | Input tokens | Output tokens |
+|-|-----------|-------------|--------------|
+| Session | [N] | [N] | [N] |
+| Lifetime | [N] | [N] | [N] |
 
 ---
-
-## Status Rules
-
-Determine the status column value for each agent using the **higher** of sessionPercent and lifetimePercent:
-- **OK** — below the `budgetWarningPercent` threshold (default 80%)
-- **Warning** — at or above the warning threshold but still `allowed: true`
-- **Exhausted** — `allowed: false`
 
 ## Notes
 
-Include these notes at the bottom:
-
-> **Note on Claude subagent tracking**: Claude subagent usage is not yet tracked automatically. The counters shown above reflect only manually recorded usage. Automatic tracking will be added in a future phase.
->
-> **To reset session counters**: Run `node -e "require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js').resetSession('C:/Users/RJ/.claude/codex-agent/usage-ledger.json')"`
->
-> **To adjust budget limits**: Edit `~/.claude/codex-agent/config.json` and modify the values under `budgets`.
+- The plan percentages come from OpenAI and include usage from every Codex client on the account (your interactive terminal, the Desktop app and codex-agent). The recorded history is codex-agent's own estimate and counts only its calls.
+- The old token-budget limits (`budgets.*` in config.json) are no longer checked (removed 2026-11-09; they were set to 5 billion tokens / $10,000 and never triggered). The quota guard in dispatch, discuss and parallel uses the plan percentages instead.
+- To reset the recorded session counters: `node -e "require('C:/Users/RJ/.claude/codex-agent/lib/usage-tracker.js').resetSession('C:/Users/RJ/.claude/codex-agent/usage-ledger.json')"`

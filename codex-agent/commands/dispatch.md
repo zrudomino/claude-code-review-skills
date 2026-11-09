@@ -192,18 +192,20 @@ Save the session object (particularly the `id`) for use in Steps 9 and 10. You w
 
 **Capture stdout**: Redirect or capture the full stdout — you will need it for parsing.
 
+**`--skip-git-repo-check`**: Codex 0.167.0 refuses to run outside a git repository, even in folders that `~/.codex/config.toml` marks trusted ("Not inside a trusted directory"), so every `exec` and `exec resume` command here passes it. Inside a git repository it changes nothing.
+
 ### Step 6a: Standard Dispatch (`IS_REVIEW` is false)
 
-This is the default path — unchanged from before.
+This is the default path. It runs `workspace-write`. If `git -C "<current-working-directory>" rev-parse --is-inside-work-tree` does not print `true` (it fails outside a repository, and prints `false` inside a `.git` folder), tell the user in one line before running: "Not in a git worktree: Codex can write here, and its changes can't be undone with git."
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox workspace-write --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<TASK_FILE>"
 ```
 
 ### Step 6b: Pure Diff Review (`IS_REVIEW` is true, `IS_FOCUSED` is false)
@@ -253,12 +255,12 @@ Then run:
 
 **If `config.review.useOutputSchema` is `true`**, include `--output-schema` to enforce structured JSON output via the API:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json --output-schema "C:/Users/RJ/.claude/codex-agent/lib/review-schema.json" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **If `config.review.useOutputSchema` is `false`** (or not set), omit `--output-schema`:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **Sandbox**: every review path runs `read-only` (both commands above, the rerouted pure-diff review, and `-c 'sandbox_mode="read-only"'` on `exec review`), so the sandbox, not the prompt, keeps reviews from modifying files. Tasks that must write (e.g. fix-and-verify's adversarial tester, which writes tests) are not reviews and go through Step 6a with `workspace-write`.

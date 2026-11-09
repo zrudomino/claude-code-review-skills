@@ -151,7 +151,7 @@ You are being consulted for your technical opinion. Do NOT write or modify any c
 <TOPIC: the exact contents of TOPIC_FILE>
 </topic>
 
-Tool budget: use at most 8 tool calls this round (shell commands, MCP calls and web searches combined). Treat facts stated in the topic as given; re-check one only if it looks wrong, and say which.
+Tool budget: use at most <ROUND1_BUDGET> tool calls this round (shell commands, MCP calls and web searches combined). Treat facts stated in the topic as given; re-check one only if it looks wrong, and say which.
 
 Provide:
 1. Your recommended approach
@@ -160,17 +160,21 @@ Provide:
 4. Suggested implementation steps
 ```
 
+**`<ROUND1_BUDGET>`**: if the topic sets its own tool budget, use that number. Otherwise use **3** when the topic itself contains the facts or content Codex needs (a `FACTS:` block with versions, measurements and earlier findings, or the pasted diff or code) and asks Codex to judge, rank or choose; use **8** for exploratory topics where Codex has to look things up first. File paths or other pointers alone do not count: Codex still has to read them, so such a topic is exploratory. Each tool call is another model step that re-sends the whole transcript, so the budget is the main cost lever (measured: an open round 1 took 33 steps and 113,659 uncached input tokens).
+
 Write this prompt to `<PROMPT_FILE>` with the **Write** tool, with the topic inserted exactly as it stands in `<TOPIC_FILE>` (the original text, not the `\!`-escaped copy). Then run codex exec with the prompt on stdin (`-`).
 
 **If `codexModel` from config is not null**, include the `-m` flag:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json -m "<codexModel>" -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **If `codexModel` is null** (default), omit `-m` entirely:
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
+
+**`--skip-git-repo-check`**: Codex 0.167.0 refuses to run outside a git repository, even in folders that `~/.codex/config.toml` marks trusted ("Not inside a trusted directory"), so every `exec` and `exec resume` command here passes it. Inside a git repository it changes nothing.
 
 **Sandbox**: all discussion rounds (this round, resumed rounds in Step 6a, and the full-context fallback in Step 6b) run `read-only`, so the sandbox enforces the "Do NOT write or modify any code" instruction instead of relying on the prompt. Codex can still read files and run read-only commands. Only the execution step (Step 10) uses `workspace-write`.
 
@@ -233,7 +237,7 @@ Then reason through the following criteria:
 
 **Convergence decision**:
 - If the proposal is sound, complete, addresses all your concerns, and you can formulate a clear execution task from it → **mark as converged** and proceed to Phase C.
-- If you see gaps, risks, alternative approaches, or important considerations that Codex missed → **formulate a follow-up** and continue to the next round.
+- If a **specific issue** remains unresolved → **formulate a follow-up** about that issue and continue to the next round. A specific issue is a fact Codex got wrong, a requirement or risk it missed, or a disagreement that would change the plan; name it in the follow-up. Do not start another round to polish wording, ask for more detail on points already settled, or confirm agreement: converge instead (each round re-sends the thread, ~13K+ input tokens on the lean profile).
 
 When you continue, state your evaluation briefly:
 > **Claude's Evaluation (Round N):**
@@ -264,7 +268,7 @@ Please respond to this feedback. Revise your proposal if needed, or defend your 
 
 Write the follow-up prompt to this round's `<PROMPT_FILE>` (Step 4a) with the **Write** tool. **If `sessionId` is available**, run:
 ```bash
-codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec resume <sessionId> --skip-git-repo-check --json -c 'sandbox_mode="read-only"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 `exec resume` takes the prompt from stdin when the prompt argument is `-` (same as `exec`).
@@ -305,9 +309,9 @@ Tool budget: use at most 3 tool calls this round; rely on the discussion summary
 Please respond to this feedback. Revise your proposal if needed, or defend your original position with additional reasoning.
 ```
 
-Write it to this round's `<PROMPT_FILE>` with the **Write** tool (topic inserted exactly as in `<TOPIC_FILE>`), then run `codex <PROFILE_FLAG> exec --sandbox read-only --json` (not resume):
+Write it to this round's `<PROMPT_FILE>` with the **Write** tool (topic inserted exactly as in `<TOPIC_FILE>`), then run `codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json` (not resume):
 ```bash
-codex <PROFILE_FLAG> exec --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox read-only --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 **Important**: Summarize each prior round concisely (2-3 sentences each) rather than forwarding full text. This keeps Codex's context window manageable and avoids token waste.
@@ -372,7 +376,7 @@ Present the execution task to the user:
 
 ### Step 10: Dispatch Execution
 
-Execute the agreed approach, preferring session resume when a Codex session ID is available from the discussion rounds.
+Execute the agreed approach, preferring session resume when a Codex session ID is available from the discussion rounds. This step runs `workspace-write`. If `git -C "<current-working-directory>" rev-parse --is-inside-work-tree` does not print `true` (it fails outside a repository, and prints `false` inside a `.git` folder), tell the user in one line before running: "Not in a git worktree: Codex can write here, and its changes can't be undone with git."
 
 #### 10a: Prepare Temp Files
 
@@ -383,7 +387,7 @@ Generate new temp files for the execution round (Step 4a pattern) and write the 
 If the `sessionId` (Codex session ID) from the last discussion round is not null, use `codex exec resume` to execute within the existing session context. Codex already has the full discussion history, so use a **short execution prompt**:
 
 ```bash
-codex <PROFILE_FLAG> exec resume <sessionId> --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec resume <sessionId> --skip-git-repo-check --json -c 'sandbox_mode="workspace-write"' --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 The `-c 'sandbox_mode="workspace-write"'` override is required: resume has no `-s/--sandbox` flag and would otherwise inherit `sandbox_mode` from `~/.codex/config.toml` (on this machine `danger-full-access`). `workspace-write` matches the fresh-exec fallback in Step 10c.
@@ -404,7 +408,7 @@ Include `-m "<codexModel>"` after `--json` if codexModel is not null.
 If `codex exec resume` fails (session not found, resume not supported) or `sessionId` is null, fall back to a fresh `codex exec` with full context. Get fresh temp paths (Step 4a) and write the **full** execution task to that new `<PROMPT_FILE>` with the **Write** tool; never reuse the short 10b prompt, which assumes the discussion history:
 
 ```bash
-codex <PROFILE_FLAG> exec --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
+codex <PROFILE_FLAG> exec --skip-git-repo-check --sandbox workspace-write --json -C "<current-working-directory>" --output-last-message "<lastMsg-temp-path>" - < "<PROMPT_FILE>"
 ```
 
 Include `-m "<codexModel>"` if codexModel is not null. The execution task should include the full agreed approach from the discussion since Codex won't have prior context.
@@ -508,5 +512,5 @@ Whether the discussion converged and executed, hit the hard cap, or was abandone
 - Use `os.tmpdir()` for temp files — never hardcode temp paths.
 - If parse-output returns zero tokens but Codex clearly ran, note that some Codex versions may not emit usage in JSONL. The result text is still valid.
 - When summarizing prior rounds for context-forwarding, be concise — 2-3 sentences per round maximum. Long context wastes Codex's tokens and can cause confusion.
-- Tool budgets (8 in round 1, 3 in follow-up rounds, none in the execution step) are prompt instructions, not enforced limits: Codex may slightly exceed them (asked for 3, used 4 in testing). They exist because in a tool-using turn every model step re-sends the growing transcript, so cost scales with the number of steps. Web search and plugin tools stay available in discussion rounds for now; switching them off needs the plugin set settled (a single `-c web_search="disabled"` does not stop browsing via plugin tools).
+- Tool budgets (round 1: 3 for fact-carrying topics, 8 for exploratory ones, or the topic's own number; follow-up rounds: 3; none in the execution step) are prompt instructions, not enforced limits: Codex may slightly exceed them (asked for 3, used 4 in testing). They exist because in a tool-using turn every model step re-sends the growing transcript, so cost scales with the number of steps. Web search and plugin tools stay available in discussion rounds for now; switching them off needs the plugin set settled (a single `-c web_search="disabled"` does not stop browsing via plugin tools).
 - The "Do NOT write or modify any code" instruction in discussion prompts is critical — it prevents Codex from making changes during the negotiation phase. Only the execution dispatch (Step 10) should produce code changes.

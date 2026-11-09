@@ -153,6 +153,8 @@ p.dispatchParallel(tasks, {}, function(err, results) {
 
 Replace `<TASK_FILE_PATH>` (the Step 2c path as a quoted string with forward slashes, e.g. `'C:/Users/RJ/AppData/Local/Temp/codex-agent/task-1762650000000-3f2a.txt'`), `<MODEL_A_OR_NULL>`, `<MODEL_B_OR_NULL>`, `<CWD>` (quoted, forward slashes), `<TIMEOUT_MS>` and `<PROFILE>` (quoted, e.g. `'lean'`) with actual values. Write each model as a quoted string (`'o4-mini'`) or `null` (not a string) for Codex's default; only names that passed the Step 4 check go in. The task text itself never appears in the script.
 
+Both tasks run `workspace-write` (and `parallel.js` passes `--skip-git-repo-check`, so they also run outside a git repository). If `git -C "<current-working-directory>" rev-parse --is-inside-work-tree` does not print `true` (it fails outside a repository, and prints `false` inside a `.git` folder), tell the user in one line before running: "Not in a git worktree: Codex can write here, and its changes can't be undone with git."
+
 Run the script:
 
 ```bash

@@ -35,7 +35,9 @@ function buildCommand(task, lastMsgPath) {
   // `--full-auto` was removed from Codex (0.167.0 rejects it: "unexpected argument").
   // Its sandbox half is `--sandbox workspace-write`, the same mode dispatch.md uses;
   // approvals do not apply to non-interactive `codex exec`.
-  args.push("exec", "--sandbox", "workspace-write", "--json");
+  // --skip-git-repo-check: exec refuses non-git folders even when config marks them
+  // trusted (verified on 0.167.0); inside a git repository the flag changes nothing.
+  args.push("exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--json");
 
   if (task.model) {
     args.push("-m", task.model);

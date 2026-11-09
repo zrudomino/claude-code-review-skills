@@ -8,6 +8,10 @@ This project contains two Claude Code skills that form a code review and fix pip
 ## Skill Locations
 - `~/.claude/skills/review-pipeline/SKILL.md` + `references/`
 - `~/.claude/skills/fix-and-verify/SKILL.md` + `references/`
+- **codex-agent** (added 2026-11-08, the Codex CLI wrapper both skills call): source `codex-agent/commands/*.md` → deploy to `~/.claude/commands/codex-agent/`; `codex-agent/lib/*` → `~/.claude/codex-agent/lib/`. User data (`config.json`, `usage-ledger.json`, `sessions/`, `cache/`) lives only in `~/.claude/codex-agent/` and is never copied either way. Targets Codex CLI 0.167.0; research and design notes in `codex-agent/docs/`.
+
+## Read First (fresh session)
+The newest `memory/HANDOVER-*.md` — it carries current status, pending user decisions and next steps.
 
 ## Architecture Rules
 - **review-pipeline owns all canonical definitions**: finding schema, state schema, gate registry, stack table, convergence algorithm
